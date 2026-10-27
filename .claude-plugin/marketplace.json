@@ -1,0 +1,14 @@
+{
+  "name": "harness-ui-mods",
+  "description": "Harness UI mods: an info pane, prompt context drawer, status line collector and activity for Claude Code",
+  "owner": {
+    "name": "harness-ui-mods contributors"
+  },
+  "plugins": [
+    {
+      "name": "info-pane",
+      "source": "./adapters/claude-code",
+      "description": "Info pane, prompt context drawer, status line collector and session activity"
+    }
+  ]
+}

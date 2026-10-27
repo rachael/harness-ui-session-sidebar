@@ -1,0 +1,12 @@
+{
+  "session": "example",
+  "title": "Example module",
+  "recap": "A fictional record for testing an existing info-pane renderer.",
+  "views": {
+    "main": {
+      "answer": "The shared data contract works with the existing viewer.",
+      "asks": [],
+      "tasks": [{"id":"example-task","subject":"Inspect the example","status":"in_progress"}]
+    }
+  }
+}

@@ -1,0 +1,662 @@
+diff --git a/codex-rs/tui/src/app/owned_transcript.rs b/codex-rs/tui/src/app/owned_transcript.rs
+index 7c43e1799..d5fb519f9 100644
+--- a/codex-rs/tui/src/app/owned_transcript.rs
++++ b/codex-rs/tui/src/app/owned_transcript.rs
+@@ -400,2 +400,19 @@ impl App {
+     ) -> Result<bool> {
++        // Modified: dismiss the optional context drawer at input-owner changes (2026-10-26).
++        if !tui.is_owned_screen()
++            || self.overlay.is_some()
++            || !self.chat_widget.no_modal_or_popup_active()
++            || matches!(
++                event,
++                TuiEvent::FocusLost | TuiEvent::Resume | TuiEvent::Paste(_)
++            )
++        {
++            if self.transcript_view.close_context_drawer() {
++                tui.frame_requester().schedule_frame();
++            }
++        } else if let TuiEvent::Mouse(mouse) = event
++            && self.transcript_view.dismiss_context_drawer_outside(*mouse)
++        {
++            tui.frame_requester().schedule_frame();
++        }
+         let has_modal = self.chat_widget.has_active_modal();
+diff --git a/codex-rs/tui/src/transcript_view.rs b/codex-rs/tui/src/transcript_view.rs
+index 0e4fc5ec6..5285d7cb1 100644
+--- a/codex-rs/tui/src/transcript_view.rs
++++ b/codex-rs/tui/src/transcript_view.rs
+@@ -10,2 +10,4 @@ mod bookmark;
+ mod composer_gap;
++// Modified: optional in-place context drawer (2026-10-26).
++mod context_drawer;
+ mod copy_mode;
+@@ -109,2 +111,4 @@ pub(crate) struct TranscriptView {
+     prompt_header_target: Option<(Rect, EntryKey)>,
++    context_drawer: context_drawer::ContextDrawer,
++    context_drawer_enabled: bool,
+     suppressed_prompt_header: Option<prompt_header::SuppressedHeader>,
+@@ -149,2 +153,5 @@ impl Default for TranscriptView {
+             prompt_header_target: None,
++            context_drawer: context_drawer::ContextDrawer::default(),
++            context_drawer_enabled: std::env::var("CODEX_UI_CONTEXT_DRAWER")
++                .is_ok_and(|value| value == "1"),
+             suppressed_prompt_header: None,
+@@ -245,2 +252,3 @@ impl TranscriptView {
+         }
++        let viewport = area;
+         let area = body;
+@@ -307,2 +315,3 @@ impl TranscriptView {
+         self.render_search(buf);
++        self.render_context_drawer(viewport, cells, buf);
+     }
+@@ -337,2 +346,4 @@ impl TranscriptView {
+         }
++        // Terminal image planes must not cover the text drawer. Keep unobscured images.
++        placements.retain(|placement| !self.context_drawer.obscures(placement.area));
+         placements
+@@ -400,2 +411,3 @@ impl TranscriptView {
+         }
++        self.close_context_drawer();
+         self.selection = None;
+@@ -419,3 +431,4 @@ impl TranscriptView {
+     pub(crate) fn has_active_interaction(&self) -> bool {
+-        self.select_mode.is_some()
++        self.context_drawer.is_open()
++            || self.select_mode.is_some()
+             || self.selection.is_some()
+diff --git a/codex-rs/tui/src/transcript_view/context_drawer.rs b/codex-rs/tui/src/transcript_view/context_drawer.rs
+new file mode 100644
+index 000000000..eb92b1652
+--- /dev/null
++++ b/codex-rs/tui/src/transcript_view/context_drawer.rs
+@@ -0,0 +1,271 @@
++// Modified: add an optional in-place context drawer (2026-10-26).
++//! Inspect pinned context without moving the transcript, composer, or selection.
++//!
++//! The drawer is an overlay over already-painted transcript rows. Its scroll offset and
++//! one-cell layout cache are independent of transcript navigation and source-based copying.
++
++use super::*;
++use crossterm::event::KeyCode;
++use crossterm::event::KeyEvent;
++use crossterm::event::KeyModifiers;
++use crossterm::event::MouseButton;
++use crossterm::event::MouseEvent;
++use crossterm::event::MouseEventKind;
++use ratatui::layout::Position as ScreenPosition;
++
++#[derive(Default)]
++pub(super) struct ContextDrawer {
++    target: Option<EntryKey>,
++    keyboard: bool,
++    offset: usize,
++    area: Option<Rect>,
++    layout: Option<(EntryKey, u16, TextLayout)>,
++}
++
++impl ContextDrawer {
++    pub(super) fn is_open(&self) -> bool {
++        self.target.is_some()
++    }
++
++    fn open(&mut self, key: EntryKey, keyboard: bool) {
++        if self.target != Some(key) {
++            self.offset = 0;
++        }
++        self.target = Some(key);
++        self.keyboard = keyboard;
++    }
++
++    pub(super) fn obscures(&self, area: Rect) -> bool {
++        self.area
++            .is_some_and(|drawer| !drawer.intersection(area).is_empty())
++    }
++
++    fn contains(&self, column: u16, row: u16) -> bool {
++        self.area
++            .is_some_and(|area| area.contains(ScreenPosition::new(column, row)))
++    }
++
++    fn scroll(&mut self, rows: isize) {
++        let count = self
++            .layout
++            .as_ref()
++            .map_or(0, |(_, _, layout)| layout.row_count());
++        let page = self
++            .area
++            .map_or(0, |area| usize::from(area.height.saturating_sub(2)));
++        self.offset = self
++            .offset
++            .saturating_add_signed(rows)
++            .min(count.saturating_sub(page));
++    }
++}
++
++impl TranscriptView {
++    pub(crate) fn close_context_drawer(&mut self) -> bool {
++        let open = self.context_drawer.is_open();
++        self.context_drawer = ContextDrawer::default();
++        open
++    }
++
++    /// Composer events can be handled before transcript mouse input. Observe leaving here too.
++    pub(crate) fn dismiss_context_drawer_outside(&mut self, event: MouseEvent) -> bool {
++        if self.context_drawer.is_open()
++            && !self.context_drawer.keyboard
++            && !self.context_drawer.contains(event.column, event.row)
++            && !self.prompt_header_target.is_some_and(|(area, _)| {
++                area.contains(ScreenPosition::new(event.column, event.row))
++            })
++        {
++            return self.close_context_drawer();
++        }
++        false
++    }
++
++    pub(super) fn render_context_drawer(
++        &mut self,
++        viewport: Rect,
++        cells: &[Arc<dyn HistoryCell>],
++        buf: &mut Buffer,
++    ) {
++        if !self.context_drawer_enabled {
++            return;
++        }
++        let Some((header, key)) = self.prompt_header_target else {
++            self.close_context_drawer();
++            return;
++        };
++        if self.context_drawer.target != Some(key) || viewport.height < 4 {
++            self.close_context_drawer();
++            return;
++        }
++        let drawer = &mut self.context_drawer;
++        if drawer
++            .layout
++            .as_ref()
++            .is_none_or(|(cached, width, _)| *cached != key || *width != header.width)
++        {
++            let Some(cell) = cells.iter().find(|cell| EntryKey::cell(cell) == key) else {
++                self.close_context_drawer();
++                return;
++            };
++            drawer.layout = Some((
++                key,
++                header.width,
++                TextLayout::new(cell.transcript_hyperlink_lines(header.width), header.width),
++            ));
++        }
++        let Some((_, _, layout)) = &drawer.layout else {
++            return;
++        };
++        // Keep the composer and one underlying transcript row visible. No transcript geometry changes.
++        let height = layout
++            .row_count()
++            .saturating_add(2)
++            .min(usize::from(viewport.height.saturating_sub(1))) as u16;
++        let area = Rect::new(header.x, header.y, header.width, height);
++        let page = usize::from(height.saturating_sub(2));
++        drawer.offset = drawer.offset.min(layout.row_count().saturating_sub(page));
++        drawer.area = Some(area);
++        let body = Rect::new(area.x, area.y + 1, area.width, height.saturating_sub(2));
++        Clear.render(body, buf);
++        layout.render(body, buf, drawer.offset);
++        let footer = Rect::new(area.x, area.bottom() - 1, area.width, 1);
++        Clear.render(footer, buf);
++        let hint = format!(
++            "{}–{}/{} · wheel/↑↓ · enter jump · esc close",
++            drawer.offset + 1,
++            (drawer.offset + page).min(layout.row_count()),
++            layout.row_count()
++        );
++        crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
++            Line::from(hint).dim(),
++            usize::from(area.width),
++        )
++        .render(footer, buf);
++    }
++
++    pub(super) fn context_drawer_owns_key(&self, key: KeyEvent) -> bool {
++        self.context_drawer_enabled
++            && key.modifiers.is_empty()
++            && (key.code == KeyCode::F(5) && self.prompt_header_target.is_some()
++                || self.context_drawer.is_open()
++                    && matches!(
++                        key.code,
++                        KeyCode::Esc
++                            | KeyCode::Enter
++                            | KeyCode::Up
++                            | KeyCode::Down
++                            | KeyCode::PageUp
++                            | KeyCode::PageDown
++                            | KeyCode::Home
++                            | KeyCode::End
++                    ))
++    }
++
++    pub(super) fn handle_context_drawer_key(
++        &mut self,
++        key: KeyEvent,
++        cells: &[Arc<dyn HistoryCell>],
++    ) -> Option<ViewAction> {
++        if !self.context_drawer_enabled {
++            return None;
++        }
++        if key.modifiers == KeyModifiers::NONE && key.code == KeyCode::F(5) {
++            if self.context_drawer.is_open() {
++                self.close_context_drawer();
++            } else if let Some((_, target)) = self.prompt_header_target {
++                self.context_drawer.open(target, true);
++            } else {
++                return None;
++            }
++            return Some(ViewAction::Changed);
++        }
++        if !self.context_drawer.is_open() {
++            return None;
++        }
++        if !self.context_drawer_owns_key(key) {
++            self.close_context_drawer();
++            return None;
++        }
++        let page = self
++            .context_drawer
++            .area
++            .map_or(1, |area| (area.height.saturating_sub(2) as isize).max(1));
++        match key.code {
++            KeyCode::Esc => {
++                self.close_context_drawer();
++            }
++            KeyCode::Enter => self.jump_to_context_drawer(cells),
++            KeyCode::Up => self.context_drawer.scroll(-1),
++            KeyCode::Down => self.context_drawer.scroll(1),
++            KeyCode::PageUp => self.context_drawer.scroll(-page),
++            KeyCode::PageDown => self.context_drawer.scroll(page),
++            KeyCode::Home => self.context_drawer.offset = 0,
++            KeyCode::End => self.context_drawer.scroll(isize::MAX),
++            _ => return None,
++        }
++        Some(ViewAction::Changed)
++    }
++
++    fn jump_to_context_drawer(&mut self, cells: &[Arc<dyn HistoryCell>]) {
++        let target = self.context_drawer.target;
++        self.close_context_drawer();
++        if let Some(index) = cells
++            .iter()
++            .position(|cell| Some(EntryKey::cell(cell)) == target)
++        {
++            self.end_selection(cells);
++            self.cancel_search();
++            self.clear_activity_focus();
++            self.jump_to_entry(cells, index);
++        }
++    }
++
++    pub(super) fn handle_context_drawer_mouse(
++        &mut self,
++        event: MouseEvent,
++        cells: &[Arc<dyn HistoryCell>],
++    ) -> Option<ViewAction> {
++        if !self.context_drawer_enabled { return None; }
++        let header = self
++            .prompt_header_target
++            .filter(|(area, _)| area.contains(ScreenPosition::new(event.column, event.row)));
++        if event.kind == MouseEventKind::Moved
++            && header.is_some()
++            && !self
++                .selection
++                .as_ref()
++                .is_some_and(|selection| selection.dragging)
++        {
++            let (_, target) = header?;
++            if self.context_drawer.target != Some(target) {
++                self.context_drawer.open(target, false);
++                // Use the header before the first expanded frame has established its full area.
++                self.context_drawer.area = header.map(|(area, _)| area);
++                return Some(ViewAction::Changed);
++            }
++        }
++        if self.dismiss_context_drawer_outside(event) {
++            return Some(ViewAction::Changed);
++        }
++        if !self.context_drawer.is_open() || !self.context_drawer.contains(event.column, event.row)
++        {
++            return None;
++        }
++        match event.kind {
++            MouseEventKind::ScrollUp => self.context_drawer.scroll(-3),
++            MouseEventKind::ScrollDown => self.context_drawer.scroll(3),
++            MouseEventKind::Down(MouseButton::Left) if event.modifiers.is_empty() => {
++                self.last_click = None;
++                self.jump_to_context_drawer(cells);
++            }
++            _ => {}
++        }
++        // Never leak a gesture through the overlay into hidden text selection or scrolling.
++        Some(ViewAction::Changed)
++    }
++}
++
++#[cfg(test)]
++#[path = "context_drawer_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/transcript_view/context_drawer_tests.rs b/codex-rs/tui/src/transcript_view/context_drawer_tests.rs
+new file mode 100644
+index 000000000..06a4658a5
+--- /dev/null
++++ b/codex-rs/tui/src/transcript_view/context_drawer_tests.rs
+@@ -0,0 +1,283 @@
++//! Drawer interactions are presentation-only until explicit navigation.
++
++use super::*;
++use crate::history_cell::new_user_prompt;
++use crate::transcript_view::tests::cell;
++use crate::transcript_view::tests::render;
++use crate::transcript_view::tests::text;
++
++fn conversation() -> Vec<Arc<dyn HistoryCell>> {
++    vec![
++        Arc::new(new_user_prompt(
++            (0..80)
++                .map(|row| format!("complete prompt line {row:02}\n"))
++                .collect(),
++            Vec::new(),
++            Vec::new(),
++            Vec::new(),
++        )),
++        cell(
++            (0..60)
++                .map(|row| format!("answer {row}\n"))
++                .collect::<String>(),
++        ),
++    ]
++}
++
++fn mouse(kind: MouseEventKind, row: u16) -> MouseEvent {
++    MouseEvent {
++        kind,
++        column: 2,
++        row,
++        modifiers: KeyModifiers::NONE,
++    }
++}
++
++#[test]
++fn hover_and_leave_preserve_viewport_and_selection() {
++    let cells = conversation();
++    let mut view = TranscriptView::default();
++    view.context_drawer_enabled = true;
++    render(&mut view, &cells, 40, 12);
++    view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 7), &cells);
++    view.handle_mouse(
++        MouseEvent {
++            column: 8,
++            ..mouse(MouseEventKind::Drag(MouseButton::Left), 7)
++        },
++        &cells,
++    );
++    view.handle_mouse(
++        MouseEvent {
++            column: 8,
++            ..mouse(MouseEventKind::Up(MouseButton::Left), 7)
++        },
++        &cells,
++    );
++    let before = render(&mut view, &cells, 40, 12);
++    let position = view.position;
++    let area = view.area;
++    let selection = view.selected_text(&cells);
++    let rows = view
++        .visible
++        .iter()
++        .map(|row| (row.index, row.row, row.key))
++        .collect::<Vec<_>>();
++    assert!(selection.is_some());
++
++    assert!(
++        view.handle_mouse(mouse(MouseEventKind::Moved, 0), &cells)
++            .is_some()
++    );
++    let expanded = render(&mut view, &cells, 40, 12);
++    assert_ne!(text(&expanded), text(&before));
++    assert_eq!(view.position, position);
++    assert_eq!(view.area, area);
++    assert_eq!(view.selected_text(&cells), selection);
++    assert_eq!(
++        view.visible
++            .iter()
++            .map(|row| (row.index, row.row, row.key))
++            .collect::<Vec<_>>(),
++        rows
++    );
++    assert!(view.dismiss_context_drawer_outside(mouse(MouseEventKind::Moved, 20)));
++    assert_eq!(render(&mut view, &cells, 40, 12), before);
++    assert_eq!(view.selected_text(&cells), selection);
++}
++
++#[test]
++fn wheel_reads_entire_long_prompt_without_scrolling_transcript() {
++    let cells = conversation();
++    let mut view = TranscriptView::default();
++    view.context_drawer_enabled = true;
++    render(&mut view, &cells, 40, 12);
++    let position = view.position;
++    let visible = view
++        .visible
++        .iter()
++        .map(|row| (row.index, row.row))
++        .collect::<Vec<_>>();
++    view.handle_mouse(mouse(MouseEventKind::Moved, 0), &cells);
++    render(&mut view, &cells, 40, 12);
++    for _ in 0..100 {
++        view.handle_mouse(mouse(MouseEventKind::ScrollDown, 2), &cells);
++        render(&mut view, &cells, 40, 12);
++    }
++    let bottom = render(&mut view, &cells, 40, 12);
++    assert!(text(&bottom).contains("complete prompt line 79"));
++    assert_eq!(view.position, position);
++    assert_eq!(
++        view.visible
++            .iter()
++            .map(|row| (row.index, row.row))
++            .collect::<Vec<_>>(),
++        visible
++    );
++    for _ in 0..100 {
++        view.handle_mouse(mouse(MouseEventKind::ScrollUp, 2), &cells);
++    }
++    assert!(text(&render(&mut view, &cells, 40, 12)).contains("complete prompt line 00"));
++    assert_eq!(view.position, position);
++}
++
++#[test]
++fn click_navigates_to_source_and_collapses() {
++    let cells = conversation();
++    let mut view = TranscriptView::default();
++    view.context_drawer_enabled = true;
++    render(&mut view, &cells, 40, 12);
++    view.handle_mouse(mouse(MouseEventKind::Moved, 0), &cells);
++    render(&mut view, &cells, 40, 12);
++    view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2), &cells);
++    assert!(!view.context_drawer.is_open());
++    assert!(
++        matches!(view.position, Position::Reading(anchor) if anchor.key == EntryKey::cell(&cells[0]))
++    );
++    let shown = text(&render(&mut view, &cells, 40, 12));
++    assert!(shown.contains("complete prompt line 00"));
++}
++
++#[test]
++fn keyboard_fallback_scrolls_and_returns_without_changing_position() {
++    let cells = conversation();
++    let mut view = TranscriptView::default();
++    view.context_drawer_enabled = true;
++    let before = render(&mut view, &cells, 40, 12);
++    let position = view.position;
++    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
++    assert!(view.owns_interaction_key(key(KeyCode::F(5))));
++    view.handle_key(key(KeyCode::F(5)), &cells);
++    render(&mut view, &cells, 40, 12);
++    view.handle_key(key(KeyCode::End), &cells);
++    assert!(text(&render(&mut view, &cells, 40, 12)).contains("complete prompt line 79"));
++    view.handle_key(key(KeyCode::Home), &cells);
++    assert!(text(&render(&mut view, &cells, 40, 12)).contains("complete prompt line 00"));
++    view.handle_key(key(KeyCode::Esc), &cells);
++    assert_eq!(view.position, position);
++    assert_eq!(render(&mut view, &cells, 40, 12), before);
++    view.handle_key(key(KeyCode::F(5)), &cells);
++    render(&mut view, &cells, 40, 12);
++    view.handle_key(key(KeyCode::Enter), &cells);
++    assert!(
++        matches!(view.position, Position::Reading(anchor) if anchor.key == EntryKey::cell(&cells[0]))
++    );
++}
++
++#[test]
++fn narrow_resize_and_typing_dismiss_without_consuming_composer_input() {
++    let cells = conversation();
++    let mut view = TranscriptView::default();
++    view.context_drawer_enabled = true;
++    render(&mut view, &cells, 16, 5);
++    view.handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE), &cells);
++    render(&mut view, &cells, 16, 5);
++    assert!(view.context_drawer.is_open());
++    assert!(
++        view.handle_key(
++            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
++            &cells
++        )
++        .is_none()
++    );
++    assert!(!view.context_drawer.is_open());
++    view.handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE), &cells);
++    render(&mut view, &cells, 15, 3);
++    assert!(!view.context_drawer.is_open());
++    assert!(
++        view.handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE), &cells)
++            .is_none()
++    );
++}
++
++#[test]
++fn drawer_paints_only_inside_transcript_not_composer_sentinel() {
++    let cells = conversation();
++    let mut view = TranscriptView::default();
++    view.context_drawer_enabled = true;
++    let viewport = Rect::new(0, 0, 40, 12);
++    let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 16));
++    Line::from("composer draft and selection").render(Rect::new(0, 13, 40, 1), &mut buffer);
++    view.render(viewport, &mut buffer, &cells);
++    let composer = buffer.content[40 * 12..].to_vec();
++    view.handle_mouse(mouse(MouseEventKind::Moved, 0), &cells);
++    view.render(viewport, &mut buffer, &cells);
++    assert_eq!(buffer.content[40 * 12..], composer);
++}
++
++#[test]
++fn disabled_module_keeps_stock_header_and_interactions() {
++    let cells = conversation();
++    let mut stock = TranscriptView::default();
++    stock.context_drawer_enabled = false;
++    let before = render(&mut stock, &cells, 40, 12);
++    // Upstream's follow control may request a frame on pointer motion even with no drawer.
++    let position = stock.position;
++    stock.handle_mouse(mouse(MouseEventKind::Moved, 0), &cells);
++    assert_eq!(stock.position, position);
++    assert!(
++        stock
++            .handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE), &cells)
++            .is_none()
++    );
++    assert!(!stock.context_drawer.is_open());
++    assert_eq!(render(&mut stock, &cells, 40, 12), before);
++    stock.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0), &cells);
++    assert!(
++        matches!(stock.position, Position::Reading(anchor) if anchor.key == EntryKey::cell(&cells[0]))
++    );
++}
++
++/// Export actual ratatui buffers when requested; no desktop or fabricated screenshot involved.
++#[test]
++fn context_drawer_capture_views() {
++    let prompt = std::env::var_os("CODEX_DRAWER_CAPTURE_PROMPT_FILE")
++        .map(|path| std::fs::read_to_string(path).expect("read explicit capture prompt"))
++        .unwrap_or_else(|| "Please compare the fictional orchard designs and show how the gate, path, and planting beds fit together.\n\nKeep the long original request available while reading the answer, without moving the composer or leaving the current reading position. Include the complete fictional design constraints in the context preview.".to_owned());
++    let cells: Vec<Arc<dyn HistoryCell>> = vec![
++        Arc::new(new_user_prompt(
++            prompt.into(),
++            Vec::new(),
++            Vec::new(),
++            Vec::new(),
++        )),
++        cell(
++            (0..35)
++                .map(|_| "The answer remains in the transcript below the pinned prompt.\n")
++                .collect::<String>(),
++        ),
++    ];
++    let mut view = TranscriptView::default();
++    view.context_drawer_enabled = true;
++    let viewport = Rect::new(0, 0, 80, 20);
++    let mut collapsed = Buffer::empty(Rect::new(0, 0, 80, 24));
++    Line::from("› Composer stays in place").render(Rect::new(0, 21, 80, 1), &mut collapsed);
++    view.render(viewport, &mut collapsed, &cells);
++    view.handle_mouse(mouse(MouseEventKind::Moved, 0), &cells);
++    let mut expanded = collapsed.clone();
++    view.render(viewport, &mut expanded, &cells);
++    assert_ne!(text(&collapsed), text(&expanded));
++    assert_eq!(collapsed.content[80 * 20..], expanded.content[80 * 20..]);
++    assert!(view.context_drawer.is_open());
++    if let Some(directory) = std::env::var_os("CODEX_DRAWER_CAPTURE_DIR") {
++        let directory = std::path::PathBuf::from(directory);
++        std::fs::create_dir_all(&directory).unwrap();
++        for (name, buffer) in [("collapsed", collapsed), ("expanded", expanded)] {
++            let capture = serde_json::json!({
++                "source": "Codex 0.164.0 ratatui renderer fixture; not a desktop screenshot",
++                "width": buffer.area.width, "height": buffer.area.height,
++                "text": text(&buffer),
++                "cells": buffer.content.iter().enumerate().map(|(index, cell)| serde_json::json!({
++                    "x": index % 80, "y": index / 80, "symbol": cell.symbol(),
++                    "fg": format!("{:?}", cell.fg), "bg": format!("{:?}", cell.bg),
++                    "modifiers": format!("{:?}", cell.modifier),
++                })).collect::<Vec<_>>(),
++            });
++            std::fs::write(
++                directory.join(format!("{name}.json")),
++                serde_json::to_vec_pretty(&capture).unwrap(),
++            )
++            .unwrap();
++        }
++    }
++}
+diff --git a/codex-rs/tui/src/transcript_view/input.rs b/codex-rs/tui/src/transcript_view/input.rs
+index 6e3ebd290..29ccee283 100644
+--- a/codex-rs/tui/src/transcript_view/input.rs
++++ b/codex-rs/tui/src/transcript_view/input.rs
+@@ -164,2 +164,5 @@ impl TranscriptView {
+         }
++        if self.context_drawer_owns_key(key) {
++            return true;
++        }
+         if self.copy_mode.is_some() {
+@@ -200,2 +203,6 @@ impl TranscriptView {
+         }
++        // Modified: optional context drawer gets its local navigation keys (2026-10-26).
++        if let Some(action) = self.handle_context_drawer_key(key, cells) {
++            return Some(action);
++        }
+         if let Some(action) = self.handle_copy_mode_key(key, cells) {
+@@ -237,2 +244,7 @@ impl TranscriptView {
+     ) -> Option<ViewAction> {
++        if self.select_mode.is_none()
++            && let Some(action) = self.handle_context_drawer_mouse(event, cells)
++        {
++            return Some(action);
++        }
+         if self.select_mode.is_some() {
+@@ -270,2 +282,3 @@ impl TranscriptView {
+         {
++            self.close_context_drawer();
+             self.last_click = None;

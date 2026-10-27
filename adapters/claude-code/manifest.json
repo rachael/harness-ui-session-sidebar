@@ -1,0 +1,227 @@
+{
+  "schema": 1,
+  "id": "claude-code",
+  "harness": "claude-code",
+  "plugin": "info-pane",
+  "version": "0.4.0",
+  "description": "Claude Code adapter: the info pane, the prompt context drawer and the status line, as one plugin with a switch per feature",
+  "install": {
+    "kind": "claude-marketplace",
+    "marketplace": {
+      "file": ".claude-plugin/marketplace.json",
+      "name": "harness-ui-mods",
+      "source": "rachael/harness-ui-mods"
+    },
+    "plugin_ref": "info-pane@harness-ui-mods",
+    "commands": [
+      [
+        "claude",
+        "plugin",
+        "marketplace",
+        "add",
+        "<source>"
+      ],
+      [
+        "claude",
+        "plugin",
+        "install",
+        "info-pane@harness-ui-mods"
+      ]
+    ],
+    "configure": [
+      "claude",
+      "plugin",
+      "configure",
+      "info-pane@harness-ui-mods",
+      "--values-stdin"
+    ],
+    "detect": [
+      "claude",
+      "plugin",
+      "list",
+      "--json"
+    ],
+    "development": {
+      "env": "CLAUDE_CODE_PLUGIN_DIRS",
+      "path": "adapters/claude-code"
+    }
+  },
+  "features": [
+    {
+      "id": "info-pane",
+      "config_key": "infoPane",
+      "default": true,
+      "pairs_with": "codex:info-pane"
+    },
+    {
+      "id": "context-drawer",
+      "config_key": "contextDrawer",
+      "default": true,
+      "pairs_with": "codex:context-drawer"
+    },
+    {
+      "id": "statusline",
+      "name": "claude-code-tui-hud-extender-statusline",
+      "config_key": "statusline",
+      "default": false,
+      "pairs_with": "codex:statusline",
+      "enable_all": true,
+      "renderer": {
+        "slot": "statusLine",
+        "python": [
+          "codex_ui_mods.statusline",
+          "codex_ui_mods.claude_statusline"
+        ],
+        "usage": "sessions/claude/SESSION.json field usage"
+      }
+    },
+    {
+      "id": "session-sidebar",
+      "config_key": "sessionSidebar",
+      "default": false,
+      "options": [
+        {
+          "id": "switch_tabs",
+          "label": "Switch tabs",
+          "type": "boolean",
+          "default": true,
+          "runtime_env": "HARNESS_UI_SIDEBAR_SWITCH_TABS",
+          "config_key": "switchTabs"
+        },
+        {
+          "id": "switch_panes",
+          "label": "Switch panes",
+          "type": "boolean",
+          "default": true,
+          "runtime_env": "HARNESS_UI_SIDEBAR_SWITCH_PANES",
+          "config_key": "switchPanes"
+        },
+        {
+          "id": "show_claude",
+          "label": "Show Claude Code",
+          "type": "boolean",
+          "default": true,
+          "runtime_env": "HARNESS_UI_SIDEBAR_SHOW_CLAUDE",
+          "config_key": "showClaude"
+        },
+        {
+          "id": "show_codex",
+          "label": "Show Codex",
+          "type": "boolean",
+          "default": true,
+          "runtime_env": "HARNESS_UI_SIDEBAR_SHOW_CODEX",
+          "config_key": "showCodex"
+        }
+      ],
+      "description": "Optional shared session sidebar for machine-local participating session status. Sidebar session sharing is opt-in and off by default; native activity settings are separate."
+    }
+  ],
+  "options": [
+    {
+      "config_key": "matchBackground",
+      "default": true
+    },
+    {
+      "config_key": "activity",
+      "type": "string",
+      "options": [
+        "auto",
+        "on",
+        "off"
+      ],
+      "default": "auto"
+    },
+    {
+      "config_key": "showClaude",
+      "default": true
+    },
+    {
+      "config_key": "showCodex",
+      "default": true
+    },
+    {
+      "config_key": "switchTabs",
+      "default": true
+    },
+    {
+      "config_key": "switchPanes",
+      "default": true
+    }
+  ],
+  "env": [
+    "HARNESS_UI_STATE_DIR",
+    "CODEX_UI_STATE_DIR",
+    "XDG_STATE_HOME",
+    "HARNESS_UI_COMMAND",
+    "HARNESS_UI_BADGES"
+  ],
+  "shared": {
+    "contract": "contracts/overview.md",
+    "fixtures": "contracts/fixtures",
+    "sprites": "assets/sprites.json",
+    "statusline": "contracts/statusline.md",
+    "sessionSidebar": "contracts/session-sidebar.md"
+  },
+  "files": [
+    ".claude-plugin/plugin.json",
+    "LICENSE",
+    "README.md",
+    "manifest.json",
+    "hooks/hooks.json",
+    "hooks/register.tsx",
+    "hooks/info-pane.tsx",
+    "hooks/drawer.tsx",
+    "hooks/statusline.tsx",
+    "hooks/state.ts",
+    "hooks/surfaced.ts",
+    "hooks/responses.ts",
+    "hooks/sections.ts",
+    "hooks/narrow.ts",
+    "hooks/claudes.ts",
+    "types/index.d.ts",
+    "tsconfig.json",
+    "tests/kit.ts",
+    "tests/fixtures.ts",
+    "tests/pane.test.tsx",
+    "tests/contract.test.tsx",
+    "tests/responses.test.tsx",
+    "tests/drawer.test.tsx",
+    "tests/state.test.tsx",
+    "tests/narrow.test.ts",
+    "tests/statusline.test.tsx",
+    "hooks/activity.ts",
+    "tests/activity.test.tsx",
+    "runtime/harness-ui-state.py",
+    "runtime/codex_ui_mods/__init__.py",
+    "runtime/codex_ui_mods/bootstrap.py",
+    "runtime/codex_ui_mods/core.py",
+    "runtime/codex_ui_mods/surface.py",
+    "runtime/codex_ui_mods/statusline.py",
+    "runtime/codex_ui_mods/claude_statusline.py",
+    "hooks/draft.ts",
+    "tests/draft.test.ts",
+    "hooks/session-sidebar.tsx",
+    "tests/session-sidebar.test.tsx",
+    "runtime/codex_ui_mods/sessions.py",
+    "runtime/codex_ui_mods/terminals.py",
+    "runtime/codex_ui_mods/sidebar.py"
+  ],
+  "checks": [
+    [
+      "claude",
+      "plugin",
+      "validate",
+      "."
+    ],
+    [
+      "claude",
+      "plugin",
+      "test",
+      "."
+    ]
+  ],
+  "requires": {
+    "python": ">=3.11",
+    "network": false
+  }
+}

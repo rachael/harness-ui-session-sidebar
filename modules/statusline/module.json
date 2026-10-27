@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "statusline",
+  "version": "0.1.0",
+  "description": "Optional native live HUD with distinct current context, cumulative uncached processing, cache reads and quota windows.",
+  "codex": [
+    "0.164.0"
+  ],
+  "order": 30,
+  "dependencies": [],
+  "patches": [
+    "source.patch"
+  ],
+  "tests": [
+    {
+      "package": "codex-tui",
+      "filter": "status_hud"
+    }
+  ],
+  "smoke": [
+    [
+      "python3",
+      "smoke.py",
+      "{binary}"
+    ]
+  ],
+  "runtime_env": {
+    "CODEX_UI_STATUS_LINE": "1"
+  }
+}

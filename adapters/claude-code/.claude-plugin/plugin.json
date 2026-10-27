@@ -1,0 +1,81 @@
+{
+  "name": "info-pane",
+  "displayName": "Harness UI",
+  "version": "0.4.0",
+  "description": "Harness UI for Claude Code: an info pane (recap, surfaced asks and notes, pins, tasks, responses), a prompt context drawer and a status line",
+  "author": {
+    "name": "harness-ui-mods contributors"
+  },
+  "homepage": "https://github.com/rachael/harness-ui-mods",
+  "repository": "https://github.com/rachael/harness-ui-mods",
+  "license": "MIT",
+  "keywords": [
+    "info-pane",
+    "statusline",
+    "sidebar",
+    "tui",
+    "harness-ui"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "infoPane": {
+      "type": "boolean",
+      "default": true,
+      "title": "Info pane",
+      "description": "A side pane with the recap, surfaced asks and notes, pinned replies, open questions, tasks and a list of responses"
+    },
+    "contextDrawer": {
+      "type": "boolean",
+      "default": true,
+      "title": "Prompt context drawer",
+      "description": "A row above the prompt naming the prompt behind the replies in view; hover to see it, click to jump to it, /context-drawer to read it in full"
+    },
+    "statusline": {
+      "type": "boolean",
+      "default": false,
+      "title": "Status line collector",
+      "description": "Collect this session's model request totals (uncached input, output, cache reads) for the harness-ui status line renderer in Claude Code's own statusLine slot; draws nothing itself"
+    },
+    "activity": {
+      "type": "string",
+      "options": [
+        "auto",
+        "on",
+        "off"
+      ],
+      "default": "auto",
+      "title": "Share activity",
+      "description": "Record in this session's shared state whether it is working or waiting on you, for session viewers such as the session sidebar. auto: while any feature of this plugin is on"
+    },
+    "sessionSidebar": {
+      "type": "boolean",
+      "default": false,
+      "title": "Session sidebar",
+      "description": "A narrow pane listing the sessions running here, one line each; press one to switch to its tab in this window (Claude Code docks it on the right)"
+    },
+    "showClaude": {
+      "type": "boolean",
+      "default": true,
+      "title": "Session sidebar: Claude Code sessions",
+      "description": "List Claude Code sessions in the session sidebar"
+    },
+    "showCodex": {
+      "type": "boolean",
+      "default": true,
+      "title": "Session sidebar: Codex sessions",
+      "description": "List Codex sessions in the session sidebar"
+    },
+    "switchTabs": {
+      "type": "boolean",
+      "default": true,
+      "title": "Session sidebar: switch tabs",
+      "description": "Let the session sidebar switch to another tab of this window"
+    },
+    "switchPanes": {
+      "type": "boolean",
+      "default": true,
+      "title": "Session sidebar: switch panes",
+      "description": "Let it switch to a tab split into panes, when the pane is where this one is and the same size"
+    }
+  }
+}

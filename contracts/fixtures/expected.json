@@ -1,0 +1,18 @@
+{
+  "visible": [
+    "Lighthouse beacon timer",
+    "Adding a dusk timer to the lighthouse beacon; the schedule parser is done.",
+    "The beacon turns on 20 minutes after sunset.",
+    "Pick the warning lamp colour",
+    "Should the beacon blink during fog?",
+    "Tide table checks passed.",
+    "Decision: Use the LED lamp.",
+    "Wiring the dusk timer",
+    "Add a fog mode",
+    "Parse the tide table",
+    "Wind: light breeze"
+  ],
+  "hidden": ["Keep the brass bell?", "Draft note awaiting read-back.", "old"],
+  "badges": {"fog-blink": "✳", "tide-ok": "C", "lamp-kind": "✳"},
+  "duplicates": {"Should the beacon blink during fog?": 1}
+}

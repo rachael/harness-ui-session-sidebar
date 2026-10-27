@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "harness": "codex",
+  "id": "my-module",
+  "version": "0.1.0",
+  "description": "Runnable data-only starter; add a native patch only when needed",
+  "codex": [
+    "*"
+  ],
+  "order": 30,
+  "dependencies": [],
+  "patches": [],
+  "tests": [],
+  "smoke": [
+    [
+      "python3",
+      "smoke.py",
+      "{binary}"
+    ]
+  ],
+  "runtime_env": {
+    "HARNESS_UI_STATE_DIR": "~/.local/state/harness-ui-example"
+  },
+  "options": [
+    {
+      "id": "example_flag",
+      "label": "Example flag",
+      "type": "boolean",
+      "default": true,
+      "runtime_env": "HARNESS_UI_EXAMPLE_FLAG"
+    }
+  ]
+}

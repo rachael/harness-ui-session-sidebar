@@ -1,0 +1,2234 @@
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 093a6af..940fd15 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -1181,11 +1181,17 @@ impl App {
+                     if self.chat_widget.ambient_pet_image_enabled() {
+-                        let ambient_pet_area = Rect::new(
+-                            /*x*/ 0,
+-                            /*y*/ 0,
+-                            screen_size.width,
+-                            screen_size.height,
++                        let ambient_pet_area = crate::info_pane::pet_fallback_area(
++                            Rect::new(
++                                /*x*/ 0,
++                                /*y*/ 0,
++                                screen_size.width,
++                                screen_size.height,
++                            ),
++                            crate::info_pane::enabled(),
+                         );
+                         if let Err(err) = tui.draw_ambient_pet_image(
+-                            self.chat_widget
+-                                .ambient_pet_draw(ambient_pet_area, rendered_area.bottom()),
++                            // Modified: optional pane footer owns the full sprite when it fits.
++                            self.transcript_view.info_pane_pet_draw().or_else(|| {
++                                self.chat_widget
++                                    .ambient_pet_draw(ambient_pet_area, rendered_area.bottom())
++                            }),
+                         ) {
+diff --git a/codex-rs/tui/src/app/owned_transcript.rs b/codex-rs/tui/src/app/owned_transcript.rs
+index 7c43e17..52e12aa 100644
+--- a/codex-rs/tui/src/app/owned_transcript.rs
++++ b/codex-rs/tui/src/app/owned_transcript.rs
+@@ -1 +1,2 @@
++// Modified by codex-ui-mods: optional generic info pane with response navigation (2026).
+ //! Compose the owned transcript above the composer and route their selection gestures.
+@@ -120,2 +121,27 @@ impl App {
+     ) -> Result<Rect> {
++        let dock_width =
++            crate::info_pane::pane_width(screen_size.width, crate::info_pane::enabled());
++        let mut dock = (dock_width > 0).then(|| {
++            let config = self.chat_widget.config_ref();
++            crate::info_pane::Pane::load(
++                self.chat_widget.thread_id().map(|id| id.to_string()),
++                config.model.as_deref().unwrap_or(""),
++                config.cwd.as_path(),
++            )
++        });
++        let dock_area = Rect::new(
++            screen_size.width - dock_width,
++            0,
++            dock_width,
++            screen_size.height,
++        );
++        if let Some(dock) = &mut dock {
++            dock.set_selected_pet(self.chat_widget.selected_pet_id());
++        }
++        let dock_pet = self.chat_widget.ambient_pet_pane_footer(dock_area);
++        let screen_size = Size::new(screen_size.width - dock_width, screen_size.height);
++        if dock.is_some() {
++            tui.frame_requester()
++                .schedule_frame_in(Duration::from_secs(1));
++        }
+         self.chat_widget.sync_warnings(&self.transcript_cells);
+@@ -220,2 +246,9 @@ impl App {
+             chat_widget.rendered_selection.borrow_mut().areas.clear();
++            view.render_info_pane(
++                dock.as_ref(),
++                dock_pet.clone(),
++                dock_area,
++                frame.buffer,
++                &self.transcript_cells,
++            );
+             ratatui::widgets::Clear.render(
+@@ -401,2 +434,17 @@ impl App {
+         let has_modal = self.chat_widget.has_active_modal();
++        if let TuiEvent::Mouse(mouse) = event
++            && self.transcript_view.observe_info_pane_mascot_mouse(*mouse)
++        {
++            tui.frame_requester().schedule_frame();
++        }
++        if !tui.is_owned_screen()
++            || self.overlay.is_some()
++            || has_modal
++            || matches!(
++                event,
++                TuiEvent::FocusLost | TuiEvent::Resume | TuiEvent::Paste(_)
++            )
++        {
++            self.transcript_view.clear_info_pane_focus();
++        }
+         let modal_transcript_mouse = has_modal
+@@ -459,2 +507,16 @@ impl App {
+             }
++            if self.chat_widget.no_modal_or_popup_active()
++                && self
++                    .transcript_view
++                    .handle_info_pane_mouse(*mouse, &self.transcript_cells)
++            {
++                if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
++                    self.chat_widget.end_composer_drag();
++                }
++                let dirty = self.transcript_view.take_info_pane_redraw();
++                if dirty || mouse.kind != crossterm::event::MouseEventKind::Moved {
++                    tui.frame_requester().schedule_frame();
++                }
++                return Ok(true);
++            }
+             if self.chat_widget.no_modal_or_popup_active()
+@@ -749 +811,36 @@ mod warning_notice_tests;
+ mod follow_tests;
++
++#[cfg(test)]
++mod info_pane_tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn native_dock_resize_preserves_composer_and_transcript_space() -> Result<()> {
++        let mut app = crate::app::test_support::make_test_app().await;
++        app.local_settings.tui.animations = false;
++        app.chat_widget
++            .apply_external_edit("draft survives resizing".to_owned());
++        let mut tui = crate::tui::test_support::make_test_tui()?;
++        tui.set_owned_screen(true)?;
++        for width in [160, 120, 160] {
++            let size = Size::new(width, 40);
++            tui.screen_size_for_event(&TuiEvent::Resize(size))?;
++            let bottom = app.render_owned_transcript(&mut tui, size)?;
++            let dock_width = crate::info_pane::pane_width(width, crate::info_pane::enabled());
++            assert_eq!(bottom.width, width - dock_width);
++            assert_eq!(
++                app.chat_widget.composer_text_with_pending(),
++                "draft survives resizing"
++            );
++            let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
++            let text = buffer
++                .content()
++                .iter()
++                .map(ratatui::buffer::Cell::symbol)
++                .collect::<String>();
++            assert_eq!(text.contains("Harness"), dock_width > 0);
++            assert!(tui.terminal.last_known_cursor_pos.x < bottom.width);
++        }
++        Ok(())
++    }
++}
+diff --git a/codex-rs/tui/src/chatwidget/pets.rs b/codex-rs/tui/src/chatwidget/pets.rs
+index aec83e7..fe16547 100644
+--- a/codex-rs/tui/src/chatwidget/pets.rs
++++ b/codex-rs/tui/src/chatwidget/pets.rs
+@@ -102,2 +102,41 @@ impl ChatWidget {
+ 
++    // Modified: use the already selected pet in a dedicated optional pane footer.
++    pub(crate) fn selected_pet_id(&self) -> Option<&str> {
++        self.local_settings
++            .tui
++            .pet
++            .as_deref()
++            .filter(|id| *id != crate::pets::DISABLED_PET_ID)
++    }
++
++    pub(crate) fn ambient_pet_pane_footer(&self, pane: Rect) -> Option<crate::info_pane::PanePet> {
++        if !self.bottom_pane.no_modal_or_popup_active() {
++            return None;
++        }
++        let pet = self.ambient_pet.as_ref()?;
++        let padding = std::env::var("HARNESS_UI_PET_FOOTER_PADDING")
++            .ok()
++            .and_then(|value| value.parse::<u16>().ok())
++            .unwrap_or(1)
++            .min(6);
++        let area = crate::info_pane::pet_footer_area(
++            pane,
++            pet.pane_required_height()
++                .saturating_add(padding)
++                .saturating_add(crate::info_pane::mascot::affordance_rows()),
++        )?;
++        let image_area = Rect::new(
++            area.x,
++            area.y + crate::info_pane::mascot::affordance_rows(),
++            area.width,
++            area.height - crate::info_pane::mascot::affordance_rows(),
++        );
++        let draw = pet.draw_request(image_area, image_area.bottom())?;
++        let sprite = Rect::new(draw.x, draw.y, draw.columns, draw.rows);
++        if sprite.intersection(area) != sprite || draw.clear_top_y < area.y {
++            return None;
++        }
++        Some(crate::info_pane::PanePet { area, draw })
++    }
++
+     pub(crate) fn ambient_pet_draw(
+diff --git a/codex-rs/tui/src/chatwidget/pets_tests.rs b/codex-rs/tui/src/chatwidget/pets_tests.rs
+index 61ac065..756ed37 100644
+--- a/codex-rs/tui/src/chatwidget/pets_tests.rs
++++ b/codex-rs/tui/src/chatwidget/pets_tests.rs
+@@ -1 +1,2 @@
++// Modified: cover optional info-pane pet footer geometry and stock fallback (2026-10-26).
+ use super::*;
+@@ -151 +152,43 @@ async fn stale_pet_selection_completion_keeps_current_loading_popup() {
+ }
++
++#[tokio::test]
++async fn info_pane_pet_footer_fits_complete_sprite_and_falls_back_on_resize() {
++    let (mut chat, _tx, _rx, _op_rx) =
++        crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
++    assert!(
++        chat.ambient_pet_pane_footer(Rect::new(116, 0, 44, 40))
++            .is_none()
++    );
++    chat.install_test_ambient_pet_for_tests(false);
++    let pane = Rect::new(116, 0, 44, 40);
++    for kind in [
++        crate::pets::PetNotificationKind::Running,
++        crate::pets::PetNotificationKind::Waiting,
++        crate::pets::PetNotificationKind::Review,
++        crate::pets::PetNotificationKind::Failed,
++    ] {
++        chat.set_ambient_pet_notification(kind, None);
++        let footer = chat
++            .ambient_pet_pane_footer(pane)
++            .expect("complete native pet fits");
++        let sprite = Rect::new(
++            footer.draw.x,
++            footer.draw.y,
++            footer.draw.columns,
++            footer.draw.rows,
++        );
++        assert_eq!(sprite.intersection(footer.area), sprite);
++        assert!(footer.draw.clear_top_y >= footer.area.y);
++        assert_eq!(footer.area.bottom(), pane.bottom());
++    }
++    assert!(
++        chat.ambient_pet_pane_footer(Rect::new(0, 0, 0, 40))
++            .is_none()
++    );
++    assert!(
++        chat.ambient_pet_pane_footer(Rect::new(0, 0, 44, 10))
++            .is_none()
++    );
++    let stock = Rect::new(0, 0, 100, 40);
++    assert!(chat.ambient_pet_draw(stock, stock.bottom()).is_some());
++}
+diff --git a/codex-rs/tui/src/info_pane.rs b/codex-rs/tui/src/info_pane.rs
+new file mode 100644
+index 0000000..eac92de
+--- /dev/null
++++ b/codex-rs/tui/src/info_pane.rs
+@@ -0,0 +1,675 @@
++//! Read-only native dock for the shared info-pane JSON contract.
++//! Custom sections are JSON data; the renderer never executes provider code.
++//! Sections appear first, then session details and populated content groups.
++pub(crate) mod mascot;
++
++use ratatui::buffer::Buffer;
++use ratatui::layout::Rect;
++use ratatui::style::Stylize;
++use ratatui::text::{Line, Span};
++use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
++use serde_json::Value;
++use std::fs::File;
++use std::io::Read;
++use std::path::{Path, PathBuf};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++pub(crate) const WIDTH: u16 = 44;
++
++pub(crate) fn pane_width(width: u16, enabled: bool) -> u16 {
++    if enabled && width >= 144 { WIDTH } else { 0 }
++}
++
++pub(crate) fn pet_fallback_area(screen: Rect, pane_enabled: bool) -> Rect {
++    Rect {
++        width: screen
++            .width
++            .saturating_sub(pane_width(screen.width, pane_enabled)),
++        ..screen
++    }
++}
++
++pub(crate) fn enabled() -> bool {
++    std::env::var("CODEX_UI_INFO_PANE").as_deref() == Ok("1")
++}
++
++fn state_directory() -> Option<PathBuf> {
++    std::env::var_os("HARNESS_UI_STATE_DIR")
++        .or_else(|| std::env::var_os("CODEX_UI_STATE_DIR"))
++        .map(PathBuf::from)
++        .or_else(|| {
++            std::env::var_os("XDG_STATE_HOME")
++                .map(PathBuf::from)
++                .or_else(|| {
++                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
++                })
++                .map(|root| root.join("harness-ui-mods"))
++        })
++}
++
++fn read(path: &Path) -> Value {
++    let mut bytes = Vec::new();
++    let result = File::open(path).and_then(|file| file.take(1_048_577).read_to_end(&mut bytes));
++    if result.is_err() || bytes.len() > 1_048_576 {
++        return Value::Null;
++    }
++    let record: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
++    if record["schema_version"] == 1 && record["revision"].is_string() {
++        record["data"].clone()
++    } else {
++        record
++    }
++}
++
++/// Record text: control characters removed except newlines, bounded.
++fn text(value: &Value) -> String {
++    value
++        .as_str()
++        .unwrap_or("")
++        .chars()
++        .filter(|c| !c.is_control() || *c == '\n')
++        .take(8000)
++        .collect()
++}
++
++/// Section text: control characters removed and display length bounded.
++fn clean(value: &Value, length: usize) -> String {
++    value
++        .as_str()
++        .unwrap_or("")
++        .chars()
++        .filter(|c| !c.is_control())
++        .take(length)
++        .collect()
++}
++
++fn clip(value: &str, width: usize) -> String {
++    if value.chars().count() <= width {
++        value.to_owned()
++    } else {
++        let mut clipped: String = value.chars().take(width.saturating_sub(1).max(1)).collect();
++        clipped.push('…');
++        clipped
++    }
++}
++
++fn wrap(value: &str, width: usize) -> Vec<String> {
++    let wrapped: Vec<String> = textwrap::wrap(value, width.max(1))
++        .into_iter()
++        .map(|line| line.into_owned())
++        .collect();
++    if wrapped.is_empty() {
++        vec![String::new()]
++    } else {
++        wrapped
++    }
++}
++
++fn heading(lines: &mut Vec<Line<'static>>, title: String, count: Option<usize>) {
++    if !lines.is_empty() {
++        lines.push(Line::from(""));
++    }
++    let mut spans = vec![Span::from(title).bold()];
++    if let Some(count) = count {
++        spans.push(Span::from(format!(" {count}")).dim());
++    }
++    lines.push(Line::from(spans));
++}
++
++/// Providers render in key order; serde_json keeps insertion order in this crate.
++fn sections(lines: &mut Vec<Line<'static>>, sections: &Value, now_ms: f64, width: usize) {
++    let Some(providers) = sections.as_object() else {
++        return;
++    };
++    let mut keys: Vec<&String> = providers.keys().collect();
++    keys.sort();
++    for key in keys.into_iter().take(12) {
++        let section = &providers[key];
++        if !section.is_object() || section.get("visible") == Some(&Value::Bool(false)) {
++            continue;
++        }
++        let title = clean(&section["title"], 60);
++        let rows = section
++            .get("rows")
++            .cloned()
++            .unwrap_or(Value::Array(Vec::new()));
++        let Some(rows) = rows.as_array() else {
++            continue;
++        };
++        if title.is_empty() {
++            continue;
++        }
++        let icon = clean(&section["icon"], 4);
++        let title = if icon.is_empty() {
++            title
++        } else {
++            format!("{icon} {title}")
++        };
++        heading(lines, title, None);
++        for row in rows.iter().take(12) {
++            if !row.is_object() {
++                continue;
++            }
++            if let Some(expiry) = row.get("expiresAt") {
++                if expiry.as_f64().is_none_or(|expiry| expiry <= now_ms) {
++                    continue;
++                }
++            }
++            let value = clean(&row["value"], 200);
++            if value.is_empty() {
++                continue;
++            }
++            let label = clean(&row["label"], 40);
++            let row = if label.is_empty() {
++                value
++            } else {
++                format!("{label}: {value}")
++            };
++            lines.extend(wrap(&row, width).into_iter().map(Line::from));
++        }
++    }
++}
++
++fn home_relative(path: &str) -> String {
++    match std::env::var("HOME") {
++        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
++            format!("~{}", &path[home.len()..])
++        }
++        _ => path.to_owned(),
++    }
++}
++
++fn surfaced_badge(record: &Value, item: &Value) -> Option<Span<'static>> {
++    if item["verified"] != true {
++        return None;
++    }
++    let provider = clean(&item["surfaced_by"], 40).to_lowercase();
++    if provider.is_empty() {
++        return None;
++    }
++    let custom = clean(&record["surface_badges"][&provider], 4);
++    let pet = text(&record["selected_pet"]);
++    let glyph = if !custom.is_empty() {
++        custom
++    } else if provider == "claude" {
++        "✦".into()
++    } else if provider == "codex" {
++        match pet.as_str() {
++            "dewey" => "D".into(),
++            "fireball" => "F".into(),
++            "rocky" => "R".into(),
++            "seedy" => "S".into(),
++            "stacky" => "S".into(),
++            "bsod" => "B".into(),
++            "null-signal" => "N".into(),
++            "" | "codex" | "disabled" => "C".into(),
++            custom => custom
++                .trim_start_matches("custom:")
++                .chars()
++                .find(|c| c.is_alphanumeric())
++                .map(|c| c.to_uppercase().collect())
++                .unwrap_or_else(|| "C".into()),
++        }
++    } else {
++        provider
++            .chars()
++            .next()
++            .map(|c| c.to_uppercase().collect())
++            .unwrap_or_else(|| "?".into())
++    };
++    let badge = Span::from(format!("[{glyph}] "));
++    Some(match pet.as_str() {
++        "fireball" => badge.red(),
++        "dewey" => badge.yellow(),
++        "seedy" => badge.green(),
++        "bsod" => badge.blue(),
++        "null-signal" => badge.magenta(),
++        _ => badge.cyan(),
++    })
++}
++
++fn surfaced(lines: &mut Vec<Line<'static>>, record: &Value, width: usize) {
++    for (title, ask) in [("Needs attention", true), ("Saved", false)] {
++        let items = record["surfaced"]
++            .as_array()
++            .into_iter()
++            .flatten()
++            .filter(|item| {
++                item["status"] != "resolved"
++                    && if ask {
++                        item["kind"] == "ask"
++                    } else {
++                        item["kind"] == "note" || item["kind"] == "decision"
++                    }
++            })
++            .filter(|item| !text(&item["text"]).trim().is_empty())
++            .collect::<Vec<_>>();
++        if items.is_empty() {
++            continue;
++        }
++        heading(lines, title.into(), Some(items.len()));
++        for item in items {
++            let mut spans = Vec::new();
++            if let Some(badge) = surfaced_badge(record, item) {
++                spans.push(badge);
++            }
++            let label = text(&item["text"])
++                .split_whitespace()
++                .collect::<Vec<_>>()
++                .join(" ");
++            spans.push(Span::from(label));
++            lines.push(
++                crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
++                    Line::from(spans),
++                    width,
++                ),
++            );
++        }
++    }
++}
++
++pub(crate) fn lines(
++    record: &Value,
++    section_data: &Value,
++    now_ms: f64,
++    width: u16,
++    height: u16,
++) -> Vec<Line<'static>> {
++    let width = usize::from(width.max(1));
++    let mut lines = Vec::new();
++    surfaced(&mut lines, record, width);
++    sections(&mut lines, section_data, now_ms, width);
++
++    heading(&mut lines, "Harness".into(), None);
++    let model = text(&record["model"]);
++    let model = if model.is_empty() {
++        "…".to_owned()
++    } else {
++        model
++    };
++    lines.push(Line::from(clip(&format!("Codex · {model}"), width)));
++    let title = text(&record["title"]);
++    let title = if title.trim().is_empty() {
++        "main conversation".to_owned()
++    } else {
++        title
++    };
++    lines.push(Line::from(clip(title.trim(), width)));
++    let cwd = home_relative(&text(&record["cwd"]));
++    let branch = text(&record["branch"]);
++    let place = if branch.is_empty() {
++        cwd
++    } else {
++        format!("{cwd} ({branch})")
++    };
++    if !place.is_empty() {
++        lines.push(Line::from(clip(&place, width)).dim());
++    }
++    let recap = text(&record["recap"]);
++    if !recap.trim().is_empty() {
++        lines.extend(wrap(recap.trim(), width).into_iter().map(Line::from));
++    }
++
++    let pins: Vec<String> = record["pins"]
++        .as_array()
++        .into_iter()
++        .flatten()
++        .map(|pin| {
++            text(&pin["text"])
++                .split_whitespace()
++                .collect::<Vec<_>>()
++                .join(" ")
++        })
++        .filter(|pin| !pin.is_empty())
++        .collect();
++    if !pins.is_empty() {
++        heading(&mut lines, "Pinned".into(), Some(pins.len()));
++        lines.extend(
++            pins.iter()
++                .map(|pin| Line::from(clip(&format!("◆ {pin}"), width))),
++        );
++    }
++
++    let view = &record["views"]["main"];
++    let answer = text(&view["answer"]);
++    let answer = answer.trim();
++    if !answer.is_empty() {
++        heading(&mut lines, "Last answer".into(), None);
++        let room = usize::from(height)
++            .saturating_mul(35)
++            .div_euclid(100)
++            .max(6);
++        let wrapped: Vec<String> = answer.lines().flat_map(|line| wrap(line, width)).collect();
++        lines.extend(wrapped.iter().take(room).cloned().map(Line::from));
++        if wrapped.len() > room {
++            lines.push(Line::from(format!("  … {} more lines", wrapped.len() - room)).dim());
++        }
++    }
++
++    let asks: Vec<Line<'static>> = view["asks"]
++        .as_array()
++        .into_iter()
++        .flatten()
++        .take(8)
++        .filter_map(|ask| {
++            let summary = text(&ask["summary"]);
++            let shown = if summary.trim().is_empty() {
++                text(&ask["text"])
++            } else {
++                summary
++            };
++            let shown = shown.split_whitespace().collect::<Vec<_>>().join(" ");
++            if shown.is_empty() {
++                return None;
++            }
++            let marker = if ask["from"].as_str() == Some("agent") {
++                "◷"
++            } else {
++                "☐"
++            };
++            Some(Line::from(vec![
++                Span::from(marker).yellow(),
++                Span::from(clip(&format!(" {shown}"), width.saturating_sub(1))),
++            ]))
++        })
++        .collect();
++    if !asks.is_empty() {
++        heading(&mut lines, "Waiting on".into(), Some(asks.len()));
++        lines.extend(asks);
++    }
++
++    let tasks: Vec<&Value> = view["tasks"].as_array().into_iter().flatten().collect();
++    for (label, status) in [
++        ("In progress", "in_progress"),
++        ("Not started", "pending"),
++        ("Done", "completed"),
++    ] {
++        let group: Vec<&&Value> = tasks
++            .iter()
++            .filter(|task| task["status"].as_str() == Some(status))
++            .collect();
++        if group.is_empty() {
++            continue;
++        }
++        heading(&mut lines, label.into(), Some(group.len()));
++        let shown = if status == "completed" {
++            &group[group.len().saturating_sub(12)..]
++        } else {
++            &group[..]
++        };
++        let inner = width.saturating_sub(2);
++        for task in shown {
++            let subject = clip(&text(&task["subject"]), inner);
++            match status {
++                "in_progress" => {
++                    lines.push(Line::from(vec![
++                        Span::from("▸ ").green(),
++                        Span::from(subject),
++                    ]));
++                    let active = text(&task["active"]);
++                    let note = if active.is_empty() {
++                        text(&task["detail"])
++                    } else {
++                        active
++                    };
++                    if !note.is_empty() {
++                        lines.push(Line::from(format!("  {}", clip(&note, inner))).dim());
++                    }
++                }
++                "pending" => lines.push(Line::from(format!("○ {subject}"))),
++                _ => lines.push(Line::from(format!("✓ {subject}")).dim().crossed_out()),
++            }
++        }
++    }
++    lines
++}
++
++/// A complete native sprite request and its exclusively reserved footer region.
++#[derive(Clone)]
++pub(crate) struct PanePet {
++    pub(crate) area: Rect,
++    pub(crate) draw: crate::pets::AmbientPetDraw,
++}
++
++pub(crate) fn pet_footer_area(pane: Rect, required_height: u16) -> Option<Rect> {
++    // Keep a useful controls/content area and never partially clip a native image.
++    (pane.width >= WIDTH && pane.height >= required_height.saturating_add(12)).then(|| {
++        Rect::new(
++            pane.x + 1,
++            pane.bottom() - required_height,
++            pane.width - 1,
++            required_height,
++        )
++    })
++}
++
++pub(crate) struct Pane {
++    record: Value,
++    sections: Value,
++}
++
++impl Pane {
++    pub(crate) fn load(session: Option<String>, model: &str, cwd: &Path) -> Self {
++        let native_session = session
++            .clone()
++            .unwrap_or_else(|| format!("local-{}", std::process::id()));
++        let mut record = Value::Null;
++        let mut sections = Value::Null;
++        if let Some(session) =
++            session.filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
++        {
++            if let Some(root) = state_directory() {
++                record = read(&root.join(format!("sessions/codex/{session}.json")));
++                sections = read(&root.join(format!("sections/{session}.json")));
++            }
++        }
++        if !record.is_object() {
++            record = serde_json::json!({});
++        }
++        record["native_session"] = Value::String(native_session);
++        record["model"] = Value::String(model.to_owned());
++        record["cwd"] = Value::String(cwd.display().to_string());
++        Self { record, sections }
++    }
++
++    pub(crate) fn mascot_context(&self) -> (&str, &str, bool) {
++        (
++            self.record["native_session"].as_str().unwrap_or("local"),
++            self.record["recap"].as_str().unwrap_or(""),
++            self.record["selected_pet"]
++                .as_str()
++                .is_some_and(|value| value != "disabled"),
++        )
++    }
++
++    pub(crate) fn set_selected_pet(&mut self, pet: Option<&str>) {
++        self.record["selected_pet"] =
++            pet.map_or(Value::Null, |value| Value::String(value.to_owned()));
++    }
++
++    #[cfg(test)]
++    pub(crate) fn render(&self, area: Rect, buffer: &mut Buffer) {
++        Clear.render(area, buffer);
++        let block = Block::default().borders(Borders::LEFT).title(" Info ");
++        let inner = block.inner(area);
++        block.render(area, buffer);
++        self.render_content(inner, buffer);
++    }
++
++    pub(crate) fn render_content(&self, inner: Rect, buffer: &mut Buffer) {
++        let now = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap_or_default()
++            .as_secs_f64()
++            * 1000.0;
++        Paragraph::new(lines(
++            &self.record,
++            &self.sections,
++            now,
++            inner.width,
++            inner.height,
++        ))
++        .wrap(Wrap { trim: false })
++        .render(inner, buffer);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn info_pane_short_pet_fallback_stays_out_of_dock() {
++        let screen = Rect::new(0, 0, 160, 16);
++        assert_eq!(pet_fallback_area(screen, true), Rect::new(0, 0, 116, 16));
++        assert_eq!(pet_fallback_area(screen, false), screen);
++        let narrow = Rect::new(0, 0, 120, 16);
++        assert_eq!(pet_fallback_area(narrow, true), narrow);
++    }
++
++    #[test]
++    fn surfaced_badges_require_confirmation_and_resolved_items_are_hidden() {
++        let record = json!({"surfaced":[
++            {"kind":"ask","text":"Confirmed request","surfaced_by":"codex","verified":true},
++            {"kind":"note","text":"Unconfirmed note","surfaced_by":"codex","verified":false},
++            {"kind":"decision","text":"Other provider","surfaced_by":"claude","verified":true},
++            {"kind":"ask","text":"Hidden resolved","surfaced_by":"codex","verified":true,"status":"resolved"}
++        ]});
++        let shown = rendered(&record, &json!({}));
++        assert!(shown.contains("Needs attention 1"));
++        assert!(shown.contains("[C] Confirmed request"));
++        assert!(shown.contains("Saved 2"));
++        assert!(shown.contains("[✦] Other provider"));
++        assert!(!shown.contains("[C] Unconfirmed"));
++        assert!(!shown.contains("Hidden resolved"));
++        let themed = json!({"selected_pet":"fireball"});
++        assert_eq!(
++            surfaced_badge(&themed, &json!({"verified":true,"surfaced_by":"codex"}))
++                .unwrap()
++                .content,
++            "[F] "
++        );
++    }
++
++    #[test]
++    fn shared_state_envelope_renders_the_same_data() {
++        let directory = tempfile::tempdir().unwrap();
++        let path = directory.path().join("session.json");
++        let data = json!({"title":"Shared title", "harness":"Codex", "views":{}});
++        std::fs::write(
++            &path,
++            serde_json::to_vec(&json!({
++                "schema_version":1, "revision":"fixture", "data":data
++            }))
++            .unwrap(),
++        )
++        .unwrap();
++        assert_eq!(read(&path), data);
++        assert!(rendered(&read(&path), &json!({})).contains("Shared title"));
++    }
++
++    fn rendered(record: &Value, sections: &Value) -> String {
++        lines(record, sections, 10.0, 43, 50)
++            .iter()
++            .map(ToString::to_string)
++            .collect::<Vec<_>>()
++            .join("\n")
++    }
++
++    #[test]
++    fn layout_preserves_narrow_terminal_and_disable() {
++        assert_eq!(pane_width(143, true), 0);
++        assert_eq!(pane_width(144, true), 44);
++        assert_eq!(pane_width(200, false), 0);
++    }
++
++    #[test]
++    fn shared_section_is_first_gated_and_expiring() {
++        let record = json!({"views":{"main":{"answer":"visible answer"}}});
++        let mut sections = json!({"example":{"title":"Example","visible":true,"rows":[
++            {"label":"Agent","value":"Example agent"},
++            {"label":"Role","value":"expired role","expiresAt":9},
++            {"label":"Role","value":"current role","expiresAt":11}]}});
++        let shown = rendered(&record, &sections);
++        assert!(shown.starts_with("Example\nAgent: Example agent"));
++        assert!(!shown.contains("expired role"));
++        assert!(shown.contains("current role"));
++        assert!(shown.contains("visible answer"));
++        sections["example"]["visible"] = json!(false);
++        assert_eq!(rendered(&record, &sections).lines().next(), Some("Harness"));
++    }
++
++    #[test]
++    fn providers_render_in_key_order_with_icons() {
++        let sections = json!({
++            "zeta":{"title":"Zeta","rows":[{"value":"last"}]},
++            "alpha":{"title":"Alpha","icon":"◇","rows":[]},
++            "broken":{"title":"Broken","rows":"not a list"}});
++        let shown = rendered(&json!({}), &sections);
++        assert!(shown.starts_with("◇ Alpha\n\nZeta\nlast\n\nHarness"));
++        assert!(!shown.contains("Broken"));
++    }
++
++    #[test]
++    fn empty_sections_are_hidden() {
++        let shown = rendered(
++            &json!({"views":{"main":{"answer":"","asks":[],"tasks":[]}}}),
++            &json!({}),
++        );
++        assert_eq!(shown, "Harness\nCodex · …\nmain conversation");
++        for absent in [
++            "Last answer",
++            "Waiting on",
++            "In progress",
++            "Not started",
++            "Done",
++            "Pinned",
++            "—",
++        ] {
++            assert!(!shown.contains(absent), "{absent} should be hidden");
++        }
++    }
++
++    #[test]
++    fn claude_mod_fields_render_when_present() {
++        let record = json!({
++            "title":"Native pane","recap":"Reconciling the dock.","branch":"ui/shared-info-pane",
++            "cwd":"/work/codex","pins":[{"id":"p1","text":"keep\n  this","at":1}],
++            "views":{"main":{
++                "asks":[{"id":"q:0","text":"Long raw question?","summary":"Pick a name","from":"answer"},
++                        {"id":"q:1","text":"Agent is waiting","from":"agent"}],
++                "tasks":[{"id":"1","subject":"Build","status":"in_progress","active":"linking"},
++                         {"id":"2","subject":"Verify","status":"pending"},
++                         {"id":"3","subject":"Read","status":"completed"}]}}});
++        let shown = rendered(&record, &json!({}));
++        assert!(shown.contains("Native pane"));
++        assert!(shown.contains("/work/codex (ui/shared-info-pane)"));
++        assert!(shown.contains("Reconciling the dock."));
++        assert!(shown.contains("Pinned 1\n◆ keep this"));
++        assert!(shown.contains("Waiting on 2\n☐ Pick a name\n◷ Agent is waiting"));
++        assert!(!shown.contains("Long raw question?"));
++        assert!(shown.contains("In progress 1\n▸ Build\n  linking"));
++        assert!(shown.contains("Not started 1\n○ Verify"));
++        assert!(shown.contains("Done 1\n✓ Read"));
++    }
++
++    #[test]
++    fn render_stays_inside_dock() {
++        let area = Rect::new(0, 0, 160, 50);
++        let mut buffer = Buffer::empty(area);
++        buffer[(0, 0)].set_symbol("X");
++        let pane = Pane {
++            record: json!({}),
++            sections: json!({}),
++        };
++        pane.render(Rect::new(116, 0, 44, 50), &mut buffer);
++        assert_eq!(buffer[(0, 0)].symbol(), "X");
++        let screen = buffer
++            .content()
++            .iter()
++            .map(|cell| cell.symbol())
++            .collect::<String>();
++        assert!(screen.contains("Harness"));
++    }
++}
+diff --git a/codex-rs/tui/src/info_pane/assets/sprites.json b/codex-rs/tui/src/info_pane/assets/sprites.json
+new file mode 100644
+index 0000000..8cd7b36
+--- /dev/null
++++ b/codex-rs/tui/src/info_pane/assets/sprites.json
+@@ -0,0 +1,199 @@
++{
++  "schema": 1,
++  "sprites": [
++    {
++      "name": "a-waver",
++      "frames": [
++        [
++          "          ",
++          " ▐▛███▜▌/ ",
++          "▝▜█████▛  ",
++          "  ▘▘ ▝▝   "
++        ],
++        [
++          "          ",
++          " ▐▛███▜▌  ",
++          "▝▜█████▛▘ ",
++          "  ▘▘ ▝▝   "
++        ]
++      ],
++      "color": "claude",
++      "action": {
++        "kind": "toast",
++        "text": "hi! :3"
++      }
++    },
++    {
++      "name": "a-coffee",
++      "frames": [
++        [
++          "       ~  ",
++          " ▐▛███▜[_]",
++          "▝▜█████▛▘ ",
++          "  ▘▘ ▝▝   "
++        ],
++        [
++          "        ~ ",
++          " ▐▛███▜[_]",
++          "▝▜█████▛▘ ",
++          "  ▘▘ ▝▝   "
++        ]
++      ],
++      "color": "warning",
++      "action": {
++        "kind": "recap"
++      }
++    },
++    {
++      "name": "a-sleepy",
++      "frames": [
++        [
++          "        z ",
++          " ▐▀███▀▌  ",
++          "▝▜█████▛▘ ",
++          "  ▘▘ ▝▝   "
++        ],
++        [
++          "         Z",
++          " ▐▀███▀▌z ",
++          "▝▜█████▛▘ ",
++          "  ▘▘ ▝▝   "
++        ]
++      ],
++      "color": "suggestion",
++      "action": {
++        "kind": "toast",
++        "text": "zzz... five more tokens, please"
++      }
++    },
++    {
++      "name": "b-typer",
++      "frames": [
++        [
++          " ▐▛███▜▌ ·",
++          "▝▜█████▛▖ ",
++          " ┌──✻──┐  ",
++          " └─────┘  "
++        ],
++        [
++          "·▐▛███▜▌  ",
++          "▗▜█████▛▘ ",
++          " ┌──✻──┐  ",
++          " └─────┘  "
++        ]
++      ],
++      "color": "claude",
++      "action": {
++        "kind": "toast",
++        "text": "tap tap tap... shipping it"
++      }
++    },
++    {
++      "name": "b-heart",
++      "frames": [
++        [
++          "          ",
++          " ▐▛███▜▌  ",
++          "▝▜█████▛▄♥",
++          "  ▘▘ ▝▝   "
++        ],
++        [
++          "          ",
++          " ▐▀███▀▌ ♥",
++          "▝▜█████▛▟ ",
++          "  ▘▘ ▝▝   "
++        ]
++      ],
++      "color": "autoAccept",
++      "action": {
++        "kind": "toast",
++        "text": "made you a heart :3"
++      }
++    },
++    {
++      "name": "b-thinker",
++      "frames": [
++        [
++          "        … ",
++          " ▐▛███▜▌  ",
++          "▝▜█████▛▘ ",
++          "  ▘▘ ▝▝   "
++        ],
++        [
++          "       · ?",
++          " ▐▙███▟▌  ",
++          "▝▜█████▛▘ ",
++          "  ▘▘ ▝▝   "
++        ]
++      ],
++      "color": "planMode",
++      "action": {
++        "kind": "recap"
++      }
++    },
++    {
++      "name": "c-party",
++      "frames": [
++        [
++          " * . ' * ",
++          " ▐▛███▜▌ ",
++          "▝▜█████▛▘",
++          "  ▘▘ ▝▝  "
++        ],
++        [
++          "' * ` . *",
++          "▗▐▛███▜▌▖",
++          " ▜█████▛ ",
++          "  ▘▘ ▝▝  "
++        ]
++      ],
++      "color": "claude",
++      "action": {
++        "kind": "toast",
++        "text": "Confetti for you! Look how far we've come."
++      }
++    },
++    {
++      "name": "c-rocket",
++      "frames": [
++        [
++          "          ",
++          " ▐▛███▜▌  ",
++          "▝▜█████▛▘ ",
++          " .:▘▘ ▝▝:."
++        ],
++        [
++          " ▐▛███▜▌  ",
++          "▝▜█████▛▘ ",
++          "  ▘▘ ▝▝   ",
++          "  ' ** '  "
++        ]
++      ],
++      "color": "warning",
++      "action": {
++        "kind": "animate"
++      }
++    },
++    {
++      "name": "c-peek",
++      "frames": [
++        [
++          "         ",
++          "       ▐▛",
++          "      ▝▜█",
++          "         "
++        ],
++        [
++          "         ",
++          "  ?  ▐▛██",
++          "    ▝▜███",
++          "      ▘▘ "
++        ]
++      ],
++      "color": "claude",
++      "action": {
++        "kind": "next"
++      }
++    }
++  ]
++}
+diff --git a/codex-rs/tui/src/info_pane/mascot.rs b/codex-rs/tui/src/info_pane/mascot.rs
+new file mode 100644
+index 0000000..e1070ba
+--- /dev/null
++++ b/codex-rs/tui/src/info_pane/mascot.rs
+@@ -0,0 +1,291 @@
++//! Shared data-only companions: static session choice, explicit local actions, no timers or models.
++
++use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
++use ratatui::buffer::Buffer;
++use ratatui::layout::{Position, Rect};
++use ratatui::style::Stylize;
++use ratatui::text::Line;
++use ratatui::widgets::Widget;
++use serde_json::Value;
++use std::sync::LazyLock;
++
++static ASSETS: LazyLock<Value> = LazyLock::new(|| {
++    serde_json::from_str(include_str!("assets/sprites.json")).expect("valid bundled mascot data")
++});
++const AFFORDANCE_ROWS: u16 = 4; // three bubble rows and an unconditional blank gap
++pub(crate) fn static_required_height() -> u16 {
++    ASSETS["sprites"]
++        .as_array()
++        .expect("mascot list")
++        .iter()
++        .map(|sprite| {
++            sprite["frames"][0]
++                .as_array()
++                .map_or(0, |frame| frame.len() as u16)
++        })
++        .max()
++        .unwrap_or(4)
++        + AFFORDANCE_ROWS
++        + 1
++}
++
++pub(crate) fn affordance_rows() -> u16 {
++    AFFORDANCE_ROWS
++}
++
++#[derive(Default)]
++pub(crate) struct Mascot {
++    session: String,
++    index: usize,
++    area: Option<Rect>,
++    hover: bool,
++    focus: bool,
++    native: bool,
++    recap: String,
++    message: Option<String>,
++    pub(crate) dirty: bool,
++}
++
++impl Mascot {
++    pub(crate) fn focused(&self) -> bool {
++        self.focus && self.area.is_some()
++    }
++    pub(crate) fn clear_focus(&mut self) {
++        self.focus = false;
++        self.hover = false;
++    }
++
++    pub(crate) fn hide(&mut self) {
++        self.area = None;
++        self.focus = false;
++        self.hover = false;
++    }
++    pub(crate) fn observe(&mut self, mouse: MouseEvent) -> bool {
++        let hover = self
++            .area
++            .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)));
++        let changed = hover != self.hover;
++        self.hover = hover;
++        self.dirty |= changed;
++        changed
++    }
++    fn poke(&mut self) {
++        let sprites = ASSETS["sprites"].as_array().expect("mascot list");
++        let action = &sprites[self.index % sprites.len()]["action"];
++        if self.native {
++            self.message = Some("Use /pets to choose your companion.".into());
++        } else {
++            match action["kind"].as_str().unwrap_or("toast") {
++                "next" => {
++                    self.index = (self.index + 1) % sprites.len();
++                    self.message = Some("Hello from a different companion! /pets".into());
++                }
++                "recap" => {
++                    self.message = Some(if self.recap.trim().is_empty() {
++                        "No recap yet: it comes after the first answer.".into()
++                    } else {
++                        self.recap.clone()
++                    })
++                }
++                "animate" => {
++                    self.message =
++                        Some("A friendly hello! Staying still while you read. /pets".into())
++                }
++                _ => self.message = Some(action["text"].as_str().unwrap_or("hi!").into()),
++            }
++        }
++        self.dirty = true;
++    }
++    pub(crate) fn mouse(&mut self, mouse: MouseEvent) -> bool {
++        self.observe(mouse);
++        if !self.hover {
++            if matches!(mouse.kind, MouseEventKind::Down(_)) {
++                self.focus = false;
++            }
++            return false;
++        }
++        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && mouse.modifiers.is_empty() {
++            self.poke();
++        }
++        true
++    }
++    pub(crate) fn owns_key(&self, key: KeyEvent) -> bool {
++        self.area.is_some()
++            && key.modifiers.is_empty()
++            && (key.code == KeyCode::F(7)
++                || self.focus
++                    && matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ')))
++    }
++    pub(crate) fn key(&mut self, key: KeyEvent) -> bool {
++        if !self.owns_key(key) {
++            if self.focus {
++                self.focus = false;
++                self.dirty = true;
++            }
++            return false;
++        }
++        match key.code {
++            KeyCode::F(7) => self.focus = !self.focus,
++            KeyCode::Esc => self.focus = false,
++            _ => self.poke(),
++        }
++        self.dirty = true;
++        true
++    }
++    pub(crate) fn render(
++        &mut self,
++        area: Rect,
++        session: &str,
++        recap: &str,
++        native: bool,
++        buffer: &mut Buffer,
++    ) {
++        let sprites = ASSETS["sprites"].as_array().expect("mascot list");
++        if self.session != session {
++            self.session = session.to_owned();
++            self.index = session.bytes().fold(0usize, |hash, byte| {
++                hash.wrapping_mul(31).wrapping_add(usize::from(byte))
++            }) % sprites.len();
++            self.message = None;
++        }
++        self.area = Some(area);
++        self.native = native;
++        self.recap = recap.chars().take(800).collect();
++        let sprite = &sprites[self.index];
++        let frame = sprite["frames"][0]
++            .as_array()
++            .expect("four-row mascot frame");
++        let sprite_width = if native {
++            12
++        } else {
++            frame
++                .iter()
++                .map(|line| line.as_str().unwrap_or("").chars().count() as u16)
++                .max()
++                .unwrap_or(10)
++        };
++        let sprite_x = area.right().saturating_sub(sprite_width);
++        if !native {
++            let y = area.bottom().saturating_sub(frame.len() as u16);
++            for (row, line) in frame.iter().enumerate() {
++                Line::from(line.as_str().unwrap_or("").to_owned())
++                    .cyan()
++                    .render(Rect::new(sprite_x, y + row as u16, sprite_width, 1), buffer);
++            }
++        }
++        if let Some(message) = &self.message {
++            let width = usize::from(sprite_x.saturating_sub(area.x + 1)).max(1);
++            for (row, line) in textwrap::wrap(message, width)
++                .into_iter()
++                .take(4)
++                .enumerate()
++            {
++                Line::from(line.into_owned()).dim().render(
++                    Rect::new(
++                        area.x,
++                        area.y + AFFORDANCE_ROWS + row as u16,
++                        width as u16,
++                        1,
++                    ),
++                    buffer,
++                );
++            }
++        }
++        if self.hover || self.focus {
++            let width = area.width.min(38);
++            let label = self
++                .message
++                .as_deref()
++                .filter(|text| text.chars().count() + 4 <= usize::from(width))
++                .unwrap_or("Click / enter · /pets");
++            let text = label
++                .chars()
++                .filter(|c| !c.is_control())
++                .collect::<String>();
++            let inner = usize::from(width.saturating_sub(2));
++            for (row, line) in [
++                format!("╭{}╮", "─".repeat(inner)),
++                format!("│{text:<inner$}│"),
++                format!("╰{}╯", "─".repeat(inner)),
++            ]
++            .into_iter()
++            .enumerate()
++            {
++                crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
++                    Line::from(line).dim(),
++                    usize::from(width),
++                )
++                .render(
++                    Rect::new(area.right() - width, area.y + row as u16, width, 1),
++                    buffer,
++                );
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crossterm::event::KeyModifiers;
++    fn paint(mascot: &mut Mascot, session: &str) -> Buffer {
++        let mut buffer = Buffer::empty(Rect::new(0, 0, 44, 12));
++        mascot.render(
++            Rect::new(1, 3, 43, 9),
++            session,
++            "A fictional recap.",
++            false,
++            &mut buffer,
++        );
++        buffer
++    }
++    fn symbols(buffer: &Buffer) -> String {
++        buffer.content.iter().map(|cell| cell.symbol()).collect()
++    }
++    #[test]
++    fn info_pane_mascot_is_static_session_stable_with_hover_focus_gap() {
++        let mut mascot = Mascot::default();
++        let before = paint(&mut mascot, "synthetic-session");
++        let chosen = mascot.index;
++        assert!(!symbols(&before).contains("/pets"));
++        assert_eq!(paint(&mut mascot, "synthetic-session"), before);
++        mascot.observe(MouseEvent {
++            kind: MouseEventKind::Moved,
++            column: 40,
++            row: 10,
++            modifiers: KeyModifiers::NONE,
++        });
++        let expanded = paint(&mut mascot, "synthetic-session");
++        assert!(symbols(&expanded).contains("/pets"));
++        assert_eq!(mascot.index, chosen);
++        assert!((1..44).all(|x| expanded[(x, 6)].symbol() == " ")); // bubble below row5, sprite starts row8
++        mascot.observe(MouseEvent {
++            kind: MouseEventKind::Moved,
++            column: 0,
++            row: 0,
++            modifiers: KeyModifiers::NONE,
++        });
++        assert_eq!(paint(&mut mascot, "synthetic-session"), before);
++        assert!(mascot.key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE)));
++        assert!(symbols(&paint(&mut mascot, "synthetic-session")).contains("/pets"));
++        mascot.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
++        assert_eq!(paint(&mut mascot, "synthetic-session"), before);
++    }
++    #[test]
++    fn info_pane_mascot_actions_are_local_and_never_animate() {
++        let mut mascot = Mascot::default();
++        paint(&mut mascot, "synthetic-session");
++        for index in 0..ASSETS["sprites"].as_array().unwrap().len() {
++            mascot.index = index;
++            let kind = ASSETS["sprites"][index]["action"]["kind"].as_str().unwrap();
++            mascot.poke();
++            assert!(mascot.message.is_some());
++            if kind == "next" {
++                assert_ne!(mascot.index, index);
++            } else {
++                assert_eq!(mascot.index, index);
++            }
++            assert!(!mascot.message.as_deref().unwrap().is_empty());
++        }
++    }
++}
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index 147ff23..e5bef71 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -1 +1,2 @@
++// Modified by codex-ui-mods: optional generic info pane (2026).
+ // Forbid accidental stdout/stderr writes in the *library* portion of the TUI.
+@@ -167,2 +168,3 @@ mod inline_visualization;
+ pub(crate) mod insert_history;
++mod info_pane;
+ mod managed_worktree_tool_specs;
+diff --git a/codex-rs/tui/src/pets/ambient.rs b/codex-rs/tui/src/pets/ambient.rs
+index e5507ce..29204a8 100644
+--- a/codex-rs/tui/src/pets/ambient.rs
++++ b/codex-rs/tui/src/pets/ambient.rs
+@@ -190,2 +190,13 @@ impl AmbientPet {
+ 
++    // Modified: reserve complete sprite/native-notification geometry in the optional pane.
++    pub(crate) fn pane_required_height(&self) -> u16 {
++        self.image_size()
++            .rows
++            .saturating_add(
++                self.visible_notification(Instant::now())
++                    .map_or(0, notification_height),
++            )
++            .saturating_add(composer_gap_rows())
++    }
++
+     pub(crate) fn image_columns(&self) -> u16 {
+diff --git a/codex-rs/tui/src/transcript_view.rs b/codex-rs/tui/src/transcript_view.rs
+index 0e4fc5e..237aa18 100644
+--- a/codex-rs/tui/src/transcript_view.rs
++++ b/codex-rs/tui/src/transcript_view.rs
+@@ -1 +1,2 @@
++// Modified: add optional info-pane response navigation (2026-10-26).
+ //! A conversation viewport over the app's retained cells and its current live tail.
+@@ -18,2 +19,3 @@ mod mutations;
+ mod prompt_header;
++mod response_pane;
+ mod search;
+@@ -98,2 +100,3 @@ pub(crate) struct TranscriptView {
+     position: Position,
++    response_pane: response_pane::ResponsePane,
+     follow_control: follow_control::FollowControl,
+@@ -138,2 +141,3 @@ impl Default for TranscriptView {
+             position: Position::Latest,
++            response_pane: response_pane::ResponsePane::default(),
+             follow_control: follow_control::FollowControl::default(),
+@@ -423,2 +427,3 @@ impl TranscriptView {
+             || self.is_activity_focused()
++            || self.response_pane.is_focused()
+     }
+diff --git a/codex-rs/tui/src/transcript_view/input.rs b/codex-rs/tui/src/transcript_view/input.rs
+index 6e3ebd2..a503a21 100644
+--- a/codex-rs/tui/src/transcript_view/input.rs
++++ b/codex-rs/tui/src/transcript_view/input.rs
+@@ -1 +1,2 @@
++// Modified: route optional info-pane response navigation (2026-10-26).
+ //! Transcript gestures leave ordinary typing and composer editing with the existing input path.
+@@ -164,2 +165,5 @@ impl TranscriptView {
+         }
++        if self.response_pane_owns_key(key) {
++            return true;
++        }
+         if self.copy_mode.is_some() {
+@@ -200,2 +204,5 @@ impl TranscriptView {
+         }
++        if let Some(action) = self.handle_response_pane_key(key, cells) {
++            return Some(action);
++        }
+         if let Some(action) = self.handle_copy_mode_key(key, cells) {
+diff --git a/codex-rs/tui/src/transcript_view/response_pane.rs b/codex-rs/tui/src/transcript_view/response_pane.rs
+new file mode 100644
+index 0000000..08cd02f
+--- /dev/null
++++ b/codex-rs/tui/src/transcript_view/response_pane.rs
+@@ -0,0 +1,461 @@
++//! Explicit response navigation in the optional info pane; hover never changes list layout.
++
++use super::*;
++use crate::history_cell::AgentMarkdownCell;
++use crate::history_cell::AgentMessageCell;
++use crossterm::event::KeyCode;
++use crossterm::event::KeyEvent;
++use crossterm::event::KeyModifiers;
++use crossterm::event::MouseButton;
++use crossterm::event::MouseEvent;
++use crossterm::event::MouseEventKind;
++use ratatui::layout::Position as ScreenPosition;
++use ratatui::widgets::Block;
++use ratatui::widgets::Borders;
++use std::collections::HashSet;
++
++#[derive(Clone, Copy, Default, PartialEq, Eq)]
++enum Tab {
++    #[default]
++    Overview,
++    Responses,
++}
++
++struct Response {
++    // Retaining the displayed cell prevents a stale hit target's pointer identity from recycling.
++    cell: Arc<dyn HistoryCell>,
++    title: String,
++    summary: String,
++}
++
++#[derive(Clone, Copy)]
++enum Action {
++    Overview,
++    Responses,
++    Expand(EntryKey),
++    Jump(EntryKey),
++}
++
++#[derive(Default)]
++pub(super) struct ResponsePane {
++    area: Option<Rect>,
++    tab: Tab,
++    keyboard: bool,
++    selected: usize,
++    reveal_selected: bool,
++    offset: usize,
++    max_offset: usize,
++    expanded: HashSet<EntryKey>,
++    responses: Vec<Response>,
++    hits: Vec<(Rect, Action)>,
++    pet: Option<crate::info_pane::PanePet>,
++    mascot: crate::info_pane::mascot::Mascot,
++}
++
++impl ResponsePane {
++    pub(super) fn is_focused(&self) -> bool {
++        self.area.is_some() && (self.keyboard || self.mascot.focused())
++    }
++}
++
++fn excerpt(cell: &dyn HistoryCell) -> String {
++    // Bound the borrowed markdown source before allocating; large responses remain in history.
++    if let Some(source) = cell.copy_source() {
++        return source
++            .chars()
++            .filter(|c| !c.is_control() || *c == '\n')
++            .take(420)
++            .collect();
++    }
++    let mut excerpt = String::new();
++    let mut remaining = 420;
++    for line in cell.raw_lines() {
++        for character in line
++            .spans
++            .iter()
++            .flat_map(|span| span.content.chars())
++            .chain(std::iter::once('\n'))
++            .filter(|c| !c.is_control() || *c == '\n')
++        {
++            if remaining == 0 {
++                return excerpt;
++            }
++            excerpt.push(character);
++            remaining -= 1;
++        }
++    }
++    excerpt
++}
++
++impl TranscriptView {
++    pub(crate) fn render_info_pane(
++        &mut self,
++        pane: Option<&crate::info_pane::Pane>,
++        pet: Option<crate::info_pane::PanePet>,
++        area: Rect,
++        buffer: &mut Buffer,
++        cells: &[Arc<dyn HistoryCell>],
++    ) {
++        let navigation = &mut self.response_pane;
++        navigation.hits.clear();
++        navigation.pet = pet;
++        navigation.area = pane
++            .filter(|_| area.width >= 16 && area.height >= 4)
++            .map(|_| area);
++        let Some(pane) = pane.filter(|_| navigation.area.is_some()) else {
++            navigation.keyboard = false;
++            navigation.pet = None;
++            navigation.mascot.hide();
++            return;
++        };
++        navigation.responses = cells
++            .iter()
++            .rev()
++            .filter(|cell| {
++                cell.as_any().is::<AgentMarkdownCell>()
++                    || (cell.as_any().is::<AgentMessageCell>() && !cell.is_stream_continuation())
++            })
++            .filter_map(|cell| {
++                let summary = excerpt(cell.as_ref());
++                let title = summary
++                    .lines()
++                    .map(str::trim)
++                    .find(|line| !line.is_empty())?
++                    .to_owned();
++                Some(Response {
++                    cell: Arc::clone(cell),
++                    title,
++                    summary,
++                })
++            })
++            .collect();
++        navigation.expanded.retain(|key| {
++            navigation
++                .responses
++                .iter()
++                .any(|response| EntryKey::cell(&response.cell) == *key)
++        });
++        navigation.selected = navigation
++            .selected
++            .min(navigation.responses.len().saturating_sub(1));
++        Clear.render(area, buffer);
++        let block = Block::default().borders(Borders::LEFT).title(" Info ");
++        let mut inner = block.inner(area);
++        block.render(area, buffer);
++        let (session, recap, native_selected) = pane.mascot_context();
++        let mascot_area = navigation.pet.as_ref().map(|pet| pet.area).or_else(|| {
++            (!native_selected)
++                .then(|| {
++                    crate::info_pane::pet_footer_area(
++                        area,
++                        crate::info_pane::mascot::static_required_height(),
++                    )
++                })
++                .flatten()
++        });
++        if let Some(footer) = mascot_area {
++            // The bubble gap and companion never change list geometry on hover/focus.
++            inner.height = footer.y.saturating_sub(inner.y);
++            navigation
++                .mascot
++                .render(footer, session, recap, navigation.pet.is_some(), buffer);
++        } else {
++            navigation.mascot.hide();
++        }
++
++        let overview = Rect::new(inner.x, inner.y, inner.width.min(11), 1);
++        let responses = Rect::new(
++            overview.right(),
++            inner.y,
++            inner.width.saturating_sub(overview.width),
++            1,
++        );
++        Line::from("Overview")
++            .style(if navigation.tab == Tab::Overview {
++                crate::style::history_prompt_style()
++            } else {
++                Default::default()
++            })
++            .render(overview, buffer);
++        Line::from(format!("Responses {}", navigation.responses.len()))
++            .style(if navigation.tab == Tab::Responses {
++                crate::style::history_prompt_style()
++            } else {
++                Default::default()
++            })
++            .render(responses, buffer);
++        navigation
++            .hits
++            .extend([(overview, Action::Overview), (responses, Action::Responses)]);
++        let body = Rect::new(
++            inner.x,
++            inner.y + 2,
++            inner.width,
++            inner.height.saturating_sub(3),
++        );
++        let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
++        Line::from("F6 tabs · F7 pet · +/- summary")
++            .dim()
++            .render(footer, buffer);
++        if navigation.tab == Tab::Overview {
++            pane.render_content(body, buffer);
++            return;
++        }
++        let mut lines = Vec::new();
++        if navigation.responses.is_empty() {
++            lines.push((Line::from("No retained responses yet").dim(), None));
++        }
++        let mut selected_row = 0;
++        for (index, response) in navigation.responses.iter().enumerate() {
++            if index == navigation.selected {
++                selected_row = lines.len();
++            }
++            let key = EntryKey::cell(&response.cell);
++            let open = navigation.expanded.contains(&key);
++            let prefix = if open { "[-] " } else { "[+] " };
++            let line = crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
++                Line::from(format!("{prefix}{}", response.title)),
++                usize::from(body.width),
++            );
++            let line = if navigation.keyboard && index == navigation.selected {
++                line.reversed()
++            } else {
++                line
++            };
++            lines.push((line, Some((key, true))));
++            if open {
++                let summary = response
++                    .summary
++                    .split_whitespace()
++                    .collect::<Vec<_>>()
++                    .join(" ");
++                let summary = format!("Summary: {summary}");
++                for line in
++                    textwrap::wrap(&summary, usize::from(body.width.saturating_sub(2)).max(1))
++                        .into_iter()
++                        .take(4)
++                {
++                    lines.push((Line::from(format!("  {line}")).dim(), Some((key, false))));
++                }
++            }
++        }
++        if navigation.reveal_selected {
++            if selected_row < navigation.offset {
++                navigation.offset = selected_row;
++            }
++            if selected_row >= navigation.offset + usize::from(body.height) {
++                navigation.offset =
++                    selected_row.saturating_sub(usize::from(body.height.saturating_sub(1)));
++            }
++            navigation.reveal_selected = false;
++        }
++        navigation.max_offset = lines.len().saturating_sub(usize::from(body.height));
++        navigation.offset = navigation.offset.min(navigation.max_offset);
++        for (row, (line, target)) in lines
++            .into_iter()
++            .skip(navigation.offset)
++            .take(usize::from(body.height))
++            .enumerate()
++        {
++            let row = Rect::new(body.x, body.y + row as u16, body.width, 1);
++            line.render(row, buffer);
++            if let Some((key, toggle)) = target {
++                let expand_width = if toggle { row.width.min(3) } else { 0 };
++                if expand_width > 0 {
++                    navigation.hits.push((
++                        Rect::new(row.x, row.y, expand_width, 1),
++                        Action::Expand(key),
++                    ));
++                }
++                navigation.hits.push((
++                    Rect::new(row.x + expand_width, row.y, row.width - expand_width, 1),
++                    Action::Jump(key),
++                ));
++            }
++        }
++    }
++
++    fn apply_response_pane_action(&mut self, action: Action, cells: &[Arc<dyn HistoryCell>]) {
++        match action {
++            Action::Overview => {
++                self.response_pane.tab = Tab::Overview;
++                self.response_pane.offset = 0;
++            }
++            Action::Responses => {
++                self.response_pane.tab = Tab::Responses;
++                self.response_pane.offset = 0;
++            }
++            Action::Expand(key) => {
++                if !self.response_pane.expanded.remove(&key) {
++                    self.response_pane.expanded.insert(key);
++                }
++            }
++            Action::Jump(key) => {
++                if let Some(index) = cells.iter().position(|cell| EntryKey::cell(cell) == key) {
++                    self.end_selection(cells);
++                    self.cancel_search();
++                    self.clear_activity_focus();
++                    self.jump_to_entry(cells, index);
++                }
++            }
++        }
++    }
++
++    pub(crate) fn info_pane_pet_draw(&self) -> Option<crate::pets::AmbientPetDraw> {
++        self.response_pane.pet.as_ref().map(|pet| pet.draw.clone())
++    }
++
++    pub(crate) fn observe_info_pane_mascot_mouse(&mut self, mouse: MouseEvent) -> bool {
++        self.response_pane.mascot.observe(mouse)
++    }
++
++    pub(crate) fn take_info_pane_redraw(&mut self) -> bool {
++        std::mem::take(&mut self.response_pane.mascot.dirty)
++    }
++
++    pub(crate) fn clear_info_pane_focus(&mut self) {
++        self.response_pane.keyboard = false;
++        self.response_pane.mascot.clear_focus();
++    }
++
++    pub(crate) fn handle_info_pane_mouse(
++        &mut self,
++        mouse: MouseEvent,
++        cells: &[Arc<dyn HistoryCell>],
++    ) -> bool {
++        if self.response_pane.mascot.mouse(mouse) {
++            return true;
++        }
++        if !self
++            .response_pane
++            .area
++            .is_some_and(|area| area.contains(ScreenPosition::new(mouse.column, mouse.row)))
++        {
++            if matches!(mouse.kind, MouseEventKind::Down(_)) {
++                self.response_pane.keyboard = false;
++            }
++            return false;
++        }
++        match mouse.kind {
++            MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
++                let action = self
++                    .response_pane
++                    .hits
++                    .iter()
++                    .find(|(area, _)| area.contains(ScreenPosition::new(mouse.column, mouse.row)))
++                    .map(|(_, action)| *action);
++                self.response_pane.keyboard = false;
++                if let Some(action) = action {
++                    self.apply_response_pane_action(action, cells);
++                }
++            }
++            MouseEventKind::ScrollUp => {
++                self.response_pane.offset = self.response_pane.offset.saturating_sub(3)
++            }
++            MouseEventKind::ScrollDown => {
++                self.response_pane.offset = self
++                    .response_pane
++                    .offset
++                    .saturating_add(3)
++                    .min(self.response_pane.max_offset)
++            }
++            _ => {}
++        }
++        true
++    }
++
++    pub(super) fn response_pane_owns_key(&self, key: KeyEvent) -> bool {
++        if self.response_pane.mascot.owns_key(key) {
++            return true;
++        }
++        self.response_pane.area.is_some()
++            && key.modifiers.is_empty()
++            && (key.code == KeyCode::F(6)
++                || self.response_pane.keyboard
++                    && matches!(
++                        key.code,
++                        KeyCode::Esc
++                            | KeyCode::Enter
++                            | KeyCode::Char(' ')
++                            | KeyCode::Up
++                            | KeyCode::Down
++                            | KeyCode::PageUp
++                            | KeyCode::PageDown
++                    ))
++    }
++
++    pub(super) fn handle_response_pane_key(
++        &mut self,
++        key: KeyEvent,
++        cells: &[Arc<dyn HistoryCell>],
++    ) -> Option<ViewAction> {
++        if self.response_pane.mascot.key(key) {
++            return Some(ViewAction::Changed);
++        }
++        if key.modifiers != KeyModifiers::NONE || self.response_pane.area.is_none() {
++            return None;
++        }
++        if key.code == KeyCode::F(6) {
++            self.response_pane.keyboard = !self.response_pane.keyboard;
++            self.response_pane.tab = if self.response_pane.keyboard {
++                Tab::Responses
++            } else {
++                Tab::Overview
++            };
++            self.response_pane.offset = 0;
++            return Some(ViewAction::Changed);
++        }
++        if !self.response_pane.keyboard {
++            return None;
++        }
++        match key.code {
++            KeyCode::Esc => self.response_pane.keyboard = false,
++            KeyCode::Enter | KeyCode::Char(' ') => {
++                let response = self
++                    .response_pane
++                    .responses
++                    .get(self.response_pane.selected)?;
++                let target = EntryKey::cell(&response.cell);
++                self.apply_response_pane_action(
++                    if key.code == KeyCode::Enter {
++                        Action::Jump(target)
++                    } else {
++                        Action::Expand(target)
++                    },
++                    cells,
++                );
++            }
++            KeyCode::Up => {
++                self.response_pane.selected = self.response_pane.selected.saturating_sub(1);
++                self.response_pane.reveal_selected = true;
++            }
++            KeyCode::Down => {
++                self.response_pane.selected = self
++                    .response_pane
++                    .selected
++                    .saturating_add(1)
++                    .min(self.response_pane.responses.len().saturating_sub(1));
++                self.response_pane.reveal_selected = true;
++            }
++            KeyCode::PageUp => {
++                self.response_pane.offset = self.response_pane.offset.saturating_sub(5)
++            }
++            KeyCode::PageDown => {
++                self.response_pane.offset = self
++                    .response_pane
++                    .offset
++                    .saturating_add(5)
++                    .min(self.response_pane.max_offset)
++            }
++            _ => {
++                self.response_pane.keyboard = false;
++                return None;
++            }
++        }
++        Some(ViewAction::Changed)
++    }
++}
++
++#[cfg(test)]
++#[path = "response_pane_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/transcript_view/response_pane_tests.rs b/codex-rs/tui/src/transcript_view/response_pane_tests.rs
+new file mode 100644
+index 0000000..5579bf3
+--- /dev/null
++++ b/codex-rs/tui/src/transcript_view/response_pane_tests.rs
+@@ -0,0 +1,264 @@
++//! Pane lists expand only through explicit controls and jump to retained native response identities.
++
++use super::*;
++use crate::history_cell::new_user_prompt;
++use crate::transcript_view::tests::cell;
++use crate::transcript_view::tests::render;
++use crate::transcript_view::tests::text;
++
++fn responses() -> Vec<Arc<dyn HistoryCell>> {
++    vec![
++        Arc::new(new_user_prompt(
++            "User prompt is not a response".into(),
++            Vec::new(),
++            Vec::new(),
++            Vec::new(),
++        )),
++        Arc::new(AgentMessageCell::new(
++            vec![
++                "First native response".into(),
++                "Extra detail for a short deterministic excerpt.".into(),
++            ],
++            true,
++        )),
++        cell("Tool output is not a response"),
++        Arc::new(AgentMessageCell::new(
++            vec!["Streaming continuation excluded".into()],
++            false,
++        )),
++        Arc::new(AgentMarkdownCell::new(
++            "Latest native response\n\nDetails from the original response, without a model call."
++                .into(),
++            std::path::Path::new("/project"),
++        )),
++    ]
++}
++
++fn paint(view: &mut TranscriptView, cells: &[Arc<dyn HistoryCell>]) -> Buffer {
++    let mut buffer = Buffer::empty(Rect::new(0, 0, 160, 20));
++    let pane =
++        crate::info_pane::Pane::load(None, "example-model", std::path::Path::new("/project"));
++    view.render_info_pane(
++        Some(&pane),
++        None,
++        Rect::new(116, 0, 44, 20),
++        &mut buffer,
++        cells,
++    );
++    buffer
++}
++
++fn click_action(
++    view: &mut TranscriptView,
++    cells: &[Arc<dyn HistoryCell>],
++    choose: impl Fn(Action) -> bool,
++) {
++    let area = view
++        .response_pane
++        .hits
++        .iter()
++        .find(|(_, action)| choose(*action))
++        .unwrap()
++        .0;
++    assert!(view.handle_info_pane_mouse(
++        MouseEvent {
++            kind: MouseEventKind::Down(MouseButton::Left),
++            column: area.x,
++            row: area.y,
++            modifiers: KeyModifiers::NONE
++        },
++        cells
++    ));
++}
++
++#[test]
++fn response_pane_has_native_tabs_and_no_hover_expansion() {
++    let cells = responses();
++    let mut view = TranscriptView::default();
++    let overview = paint(&mut view, &cells);
++    assert_eq!(view.response_pane.responses.len(), 2);
++    assert!(text(&overview).contains("Overview"));
++    click_action(&mut view, &cells, |action| {
++        matches!(action, Action::Responses)
++    });
++    let before = paint(&mut view, &cells);
++    assert!(text(&before).contains("Latest native response"));
++    assert!(!text(&before).contains("Tool output"));
++    for row in 0..20 {
++        view.handle_info_pane_mouse(
++            MouseEvent {
++                kind: MouseEventKind::Moved,
++                column: 118,
++                row,
++                modifiers: KeyModifiers::NONE,
++            },
++            &cells,
++        );
++    }
++    assert!(view.response_pane.expanded.is_empty());
++    assert_eq!(paint(&mut view, &cells), before);
++}
++
++#[test]
++fn response_pane_expand_preserves_transcript_then_row_click_jumps() {
++    let cells = responses();
++    let mut view = TranscriptView::default();
++    render(&mut view, &cells, 80, 8);
++    let position = view.position;
++    paint(&mut view, &cells);
++    click_action(&mut view, &cells, |action| {
++        matches!(action, Action::Responses)
++    });
++    paint(&mut view, &cells);
++    click_action(&mut view, &cells, |action| {
++        matches!(action, Action::Expand(_))
++    });
++    let expanded = paint(&mut view, &cells);
++    assert!(text(&expanded).contains("Summary:"));
++    assert_eq!(view.position, position);
++    click_action(&mut view, &cells, |action| {
++        matches!(action, Action::Jump(_))
++    });
++    assert!(
++        matches!(view.position, Position::Reading(anchor) if anchor.key == EntryKey::cell(&cells[4]))
++    );
++}
++
++#[test]
++fn response_pane_jump_survives_prepend_and_rejects_removed_target() {
++    let mut cells = responses();
++    let mut view = TranscriptView::default();
++    paint(&mut view, &cells);
++    click_action(&mut view, &cells, |action| {
++        matches!(action, Action::Responses)
++    });
++    paint(&mut view, &cells);
++    let target = EntryKey::cell(&cells[4]);
++    cells.insert(0, cell("Older paginated history"));
++    click_action(
++        &mut view,
++        &cells,
++        |action| matches!(action, Action::Jump(key) if key == target),
++    );
++    assert!(
++        matches!(view.position, Position::Reading(anchor) if anchor.key == target && anchor.index == 5)
++    );
++    view.jump_to_latest();
++    cells.pop();
++    click_action(
++        &mut view,
++        &cells,
++        |action| matches!(action, Action::Jump(key) if key == target),
++    );
++    assert_eq!(view.position, Position::Latest);
++}
++
++#[test]
++fn response_pane_scroll_and_keyboard_do_not_scroll_transcript() {
++    let cells: Vec<Arc<dyn HistoryCell>> = (0..40)
++        .map(|index| {
++            Arc::new(AgentMessageCell::new(
++                vec![format!("Response {index}").into()],
++                true,
++            )) as Arc<dyn HistoryCell>
++        })
++        .collect();
++    let mut view = TranscriptView::default();
++    render(&mut view, &cells, 80, 8);
++    let position = view.position;
++    paint(&mut view, &cells);
++    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
++    view.handle_key(key(KeyCode::F(6)), &cells);
++    paint(&mut view, &cells);
++    for _ in 0..40 {
++        view.handle_info_pane_mouse(
++            MouseEvent {
++                kind: MouseEventKind::ScrollDown,
++                column: 120,
++                row: 8,
++                modifiers: KeyModifiers::NONE,
++            },
++            &cells,
++        );
++    }
++    assert!(view.response_pane.offset > 0);
++    assert_eq!(view.position, position);
++    view.handle_key(key(KeyCode::Char(' ')), &cells);
++    assert_eq!(view.response_pane.expanded.len(), 1);
++    view.handle_key(key(KeyCode::Enter), &cells);
++    assert!(
++        matches!(view.position, Position::Reading(anchor) if anchor.key == EntryKey::cell(&cells[39]))
++    );
++}
++
++#[test]
++fn response_pane_hides_without_keyboard_capture_and_stays_inside_dock() {
++    let cells = responses();
++    let mut view = TranscriptView::default();
++    let mut buffer = Buffer::empty(Rect::new(0, 0, 160, 20));
++    Line::from("Composer draft selection sentinel").render(Rect::new(0, 18, 116, 1), &mut buffer);
++    let before = buffer.clone();
++    let pane =
++        crate::info_pane::Pane::load(None, "example-model", std::path::Path::new("/project"));
++    view.render_info_pane(
++        Some(&pane),
++        None,
++        Rect::new(116, 0, 44, 20),
++        &mut buffer,
++        &cells,
++    );
++    for y in 0..20 {
++        for x in 0..116 {
++            assert_eq!(buffer[(x, y)], before[(x, y)]);
++        }
++    }
++    view.render_info_pane(None, None, Rect::default(), &mut buffer, &cells);
++    assert!(!view.response_pane_owns_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)));
++    assert!(!view.handle_info_pane_mouse(
++        MouseEvent {
++            kind: MouseEventKind::Down(MouseButton::Left),
++            column: 120,
++            row: 3,
++            modifiers: KeyModifiers::NONE
++        },
++        &cells
++    ));
++}
++
++#[test]
++fn response_pane_pet_footer_never_covers_response_controls() {
++    let cells = responses();
++    let mut view = TranscriptView::default();
++    let pane_area = Rect::new(116, 0, 44, 30);
++    let area = crate::info_pane::pet_footer_area(pane_area, 8).unwrap();
++    let draw = crate::pets::AmbientPetDraw {
++        frame: "fictional-frame.png".into(),
++        protocol: crate::pets::ImageProtocol::Kitty,
++        x: 150,
++        y: 24,
++        clear_top_y: area.y,
++        columns: 9,
++        rows: 5,
++        height_px: 75,
++        sixel_dir: "fictional-frames".into(),
++    };
++    let pane =
++        crate::info_pane::Pane::load(None, "example-model", std::path::Path::new("/project"));
++    let mut buffer = Buffer::empty(Rect::new(0, 0, 160, 30));
++    view.render_info_pane(
++        Some(&pane),
++        Some(crate::info_pane::PanePet { area, draw }),
++        pane_area,
++        &mut buffer,
++        &cells,
++    );
++    assert!(
++        view.response_pane
++            .hits
++            .iter()
++            .all(|(hit, _)| hit.bottom() <= area.y)
++    );
++    assert!(view.info_pane_pet_draw().is_some());
++    view.render_info_pane(None, None, Rect::default(), &mut buffer, &cells);
++    assert!(view.info_pane_pet_draw().is_none());
++}

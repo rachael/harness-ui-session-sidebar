@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-ui-mods"
+version = "0.1.0"
+description = "Selectable UI modules for coding harnesses"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+
+[project.scripts]
+harness-ui = "codex_ui_mods.bootstrap:main"
+codex-ui = "codex_ui_mods.bootstrap:codex_main"
+claude-ui = "codex_ui_mods.bootstrap:claude_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

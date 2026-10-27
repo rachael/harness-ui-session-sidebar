@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "id": "session-sidebar",
+  "version": "0.1.0",
+  "description": "Optional shared session sidebar for machine-local participating session status. Session sharing is opt-in; open a left tmux layout explicitly.",
+  "default": false,
+  "codex": [
+    "*"
+  ],
+  "order": 40,
+  "dependencies": [],
+  "patches": [],
+  "tests": [],
+  "runtime_env": {},
+  "options": [
+    {
+      "id": "switch_tabs",
+      "label": "Switch tabs",
+      "type": "boolean",
+      "default": true,
+      "runtime_env": "HARNESS_UI_SIDEBAR_SWITCH_TABS"
+    },
+    {
+      "id": "switch_panes",
+      "label": "Switch panes",
+      "type": "boolean",
+      "default": true,
+      "runtime_env": "HARNESS_UI_SIDEBAR_SWITCH_PANES"
+    },
+    {
+      "id": "show_claude",
+      "label": "Show Claude Code",
+      "type": "boolean",
+      "default": true,
+      "runtime_env": "HARNESS_UI_SIDEBAR_SHOW_CLAUDE"
+    },
+    {
+      "id": "show_codex",
+      "label": "Show Codex",
+      "type": "boolean",
+      "default": true,
+      "runtime_env": "HARNESS_UI_SIDEBAR_SHOW_CODEX"
+    }
+  ]
+}

@@ -1,0 +1,754 @@
+diff --git a/codex-rs/tui/src/app/owned_transcript.rs b/codex-rs/tui/src/app/owned_transcript.rs
+index 7c43e17..1047e81 100644
+--- a/codex-rs/tui/src/app/owned_transcript.rs
++++ b/codex-rs/tui/src/app/owned_transcript.rs
+@@ -124,2 +124,4 @@ impl App {
+         );
++        // Modified: refresh optional HUD at actual composer width before layout (2026-10-26).
++        self.chat_widget.refresh_status_hud_width(screen_size.width);
+         let composer = self.first_screen_composer();
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 4b9d285..0f61cf4 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -392,2 +392,4 @@ use self::status_state::TerminalTitleStatusKind;
+ mod status_controls;
++// Modified: optional native live status HUD, no command execution (2026-10-26).
++mod status_hud;
+ mod status_surface_commands;
+diff --git a/codex-rs/tui/src/chatwidget/status_hud.rs b/codex-rs/tui/src/chatwidget/status_hud.rs
+new file mode 100644
+index 0000000..d18da85
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/status_hud.rs
+@@ -0,0 +1,563 @@
++//! Optional live native HUD. Context, cumulative processing and cache reads are separate quantities.
++//! Inspired by codex-hud's configurable segments; no upstream implementation is copied.
++
++use crate::status::format_tokens_compact;
++use crate::token_usage::TokenUsageInfo;
++use ratatui::style::{Color, Style};
++use ratatui::text::{Line, Span};
++
++pub(super) fn enabled() -> bool {
++    std::env::var("CODEX_UI_STATUS_LINE").as_deref() == Ok("1")
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) enum Mode {
++    Extend,
++    Replace,
++}
++impl Mode {
++    pub(super) fn choose(requested: &str, native: Option<&[String]>) -> Self {
++        match requested {
++            "extend" => Self::Extend,
++            "replace" => Self::Replace,
++            _ => {
++                if native.is_none_or(|items| {
++                    items
++                        .iter()
++                        .map(String::as_str)
++                        .eq(super::DEFAULT_STATUS_LINE_ITEMS)
++                }) {
++                    Self::Replace
++                } else {
++                    Self::Extend
++                }
++            }
++        }
++    }
++    pub(super) fn from_env(native: Option<&[String]>) -> Self {
++        Self::choose(
++            &std::env::var("HARNESS_UI_STATUS_LINE_MODE").unwrap_or_else(|_| "auto".into()),
++            native,
++        )
++    }
++}
++
++#[derive(Clone)]
++pub(super) struct Config {
++    pub(super) items: Vec<String>,
++    pub(super) explicit_items: bool,
++    pub(super) ascii: bool,
++    pub(super) colors: bool,
++}
++impl Config {
++    pub(super) fn from_env(native_colors: bool) -> Self {
++        let items = std::env::var("HARNESS_UI_STATUS_LINE_ITEMS")
++            .unwrap_or_else(|_| "project,model,effort,tier,context,limits,session,cache".into())
++            .split(',')
++            .map(str::trim)
++            .filter(|value| !value.is_empty())
++            .map(str::to_owned)
++            .collect();
++        Self {
++            explicit_items: std::env::var_os("HARNESS_UI_STATUS_LINE_ITEMS").is_some(),
++            items,
++            ascii: std::env::var("HARNESS_UI_STATUS_LINE_ASCII").as_deref() == Ok("1"),
++            colors: match std::env::var("HARNESS_UI_STATUS_LINE_COLORS").as_deref() {
++                Ok("1") => true,
++                Ok("0") => false,
++                _ => native_colors,
++            },
++        }
++    }
++}
++#[derive(Default)]
++pub(super) struct Data {
++    pub(super) usage: Option<TokenUsageInfo>,
++    pub(super) capacity: Option<i64>,
++    pub(super) limits: Vec<(String, f64, Option<String>)>,
++    pub(super) model: String,
++    pub(super) effort: Option<String>,
++    pub(super) tier: Option<String>,
++    pub(super) project: String,
++    pub(super) branch: Option<String>,
++    pub(super) cost: Option<String>,
++}
++struct Segment {
++    id: String,
++    text: String,
++    color: Color,
++    priority: u8,
++    group: u8,
++}
++fn clean(value: &str) -> String {
++    value
++        .chars()
++        .filter(|c| !c.is_control())
++        .take(160)
++        .collect()
++}
++fn count(value: i64) -> String {
++    format_tokens_compact(value.max(0))
++}
++fn context(data: &Data, short: bool) -> Option<String> {
++    let usage = data.usage.as_ref()?;
++    let capacity = data.capacity.filter(|capacity| *capacity > 0)?;
++    let current = usage.last_token_usage.tokens_in_context_window().max(0);
++    let percentage = (current as f64 / capacity as f64 * 100.0).round();
++    Some(if short {
++        format!("ctx {percentage:.0}%")
++    } else {
++        format!(
++            "ctx {}/{} {percentage:.0}%",
++            count(current),
++            count(capacity)
++        )
++    })
++}
++fn middle(value: &str, width: usize, ascii: bool) -> String {
++    if Line::from(value).width() <= width {
++        return value.into();
++    }
++    let mark = if ascii { "~" } else { "…" };
++    let keep = width.saturating_sub(1);
++    let chars = value.chars().collect::<Vec<_>>();
++    format!(
++        "{}{mark}{}",
++        chars.iter().take(keep / 2).collect::<String>(),
++        chars
++            .iter()
++            .skip(chars.len().saturating_sub(keep - keep / 2))
++            .collect::<String>()
++    )
++}
++fn join_width(segments: &[Segment], group: &str, part: &str) -> usize {
++    segments
++        .iter()
++        .map(|segment| Line::from(segment.text.as_str()).width())
++        .sum::<usize>()
++        + segments
++            .windows(2)
++            .map(|pair| {
++                if pair[0].group == pair[1].group {
++                    part.chars().count()
++                } else {
++                    group.chars().count()
++                }
++            })
++            .sum::<usize>()
++}
++
++pub(super) fn render(data: &Data, config: &Config, width: u16) -> Line<'static> {
++    let mut segments = Vec::new();
++    for id in &config.items {
++        if segments.iter().any(|segment: &Segment| segment.id == *id) {
++            continue;
++        }
++        let (text, color, priority, group) = match id.as_str() {
++            "project" => {
++                if data.project.is_empty() {
++                    continue;
++                }
++                let branch = data
++                    .branch
++                    .as_ref()
++                    .map(|branch| format!(" ({})", clean(branch)))
++                    .unwrap_or_default();
++                (
++                    format!("{}{branch}", clean(&data.project)),
++                    Color::Blue,
++                    0,
++                    0,
++                )
++            }
++            "model" => {
++                if data.model.is_empty() {
++                    continue;
++                }
++                (clean(&data.model), Color::Magenta, 3, 1)
++            }
++            "effort" => {
++                let Some(effort) = &data.effort else {
++                    continue;
++                };
++                (clean(effort), Color::Magenta, 9, 1)
++            }
++            "tier" => {
++                let Some(tier) = &data.tier else {
++                    continue;
++                };
++                (clean(tier), Color::Magenta, 9, 1)
++            }
++            "context" => {
++                let Some(text) = context(data, false) else {
++                    continue;
++                };
++                let percent = data
++                    .usage
++                    .as_ref()
++                    .zip(data.capacity)
++                    .map(|(usage, capacity)| {
++                        usage.last_token_usage.tokens_in_context_window().max(0) as f64
++                            / capacity.max(1) as f64
++                            * 100.0
++                    })
++                    .unwrap_or(0.0);
++                (
++                    text,
++                    if percent >= 90.0 {
++                        Color::Red
++                    } else if percent >= 70.0 {
++                        Color::Yellow
++                    } else {
++                        Color::Cyan
++                    },
++                    0,
++                    2,
++                )
++            }
++            "limits" => {
++                for (index, (label, used, reset)) in data
++                    .limits
++                    .iter()
++                    .filter(|(_, used, _)| used.is_finite())
++                    .enumerate()
++                {
++                    let reset = reset
++                        .as_ref()
++                        .map(|reset| format!(" reset {}", clean(reset)))
++                        .unwrap_or_default();
++                    segments.push(Segment {
++                        id: format!("limits-{index}"),
++                        text: format!(
++                            "{} {:.0}% left{reset}",
++                            clean(label),
++                            (100.0 - used).clamp(0.0, 100.0)
++                        ),
++                        color: Color::Yellow,
++                        priority: if index == 0 { 4 } else { 5 },
++                        group: 3,
++                    });
++                }
++                continue;
++            }
++            "session" => {
++                let Some(usage) = &data.usage else {
++                    continue;
++                };
++                let total = &usage.total_token_usage;
++                let uncached = total
++                    .input_tokens
++                    .max(0)
++                    .saturating_sub(total.cached_input_tokens.max(0))
++                    .max(0);
++                (
++                    format!(
++                        "sess {} uncached+out",
++                        count(uncached.saturating_add(total.output_tokens.max(0)))
++                    ),
++                    Color::White,
++                    6,
++                    4,
++                )
++            }
++            "cache" => {
++                let Some(usage) = &data.usage else {
++                    continue;
++                };
++                let input = usage.total_token_usage.input_tokens.max(0);
++                if input == 0 {
++                    continue;
++                }
++                let cached = usage.total_token_usage.cached_input_tokens.clamp(0, input);
++                (
++                    format!("cache read {:.0}%", cached as f64 / input as f64 * 100.0),
++                    Color::Green,
++                    7,
++                    4,
++                )
++            }
++            "cost" => {
++                let Some(cost) = &data.cost else {
++                    continue;
++                };
++                (clean(cost), Color::White, 8, 4)
++            }
++            _ => continue,
++        };
++        segments.push(Segment {
++            id: id.clone(),
++            text,
++            color,
++            priority,
++            group,
++        });
++    }
++    let (group_sep, part_sep) = if config.ascii {
++        (" || ", " | ")
++    } else {
++        (" ‖ ", " · ")
++    };
++    while join_width(&segments, group_sep, part_sep) > usize::from(width) {
++        let least = segments
++            .iter()
++            .enumerate()
++            .filter(|(_, segment)| segment.priority > 0)
++            .max_by_key(|(_, segment)| segment.priority)
++            .map(|(index, _)| index);
++        if let Some(index) = least {
++            segments.remove(index);
++        } else {
++            break;
++        }
++    }
++    if join_width(&segments, group_sep, part_sep) > usize::from(width) {
++        if let Some(segment) = segments.iter_mut().find(|segment| segment.id == "context") {
++            segment.text = context(data, true).unwrap_or_default();
++        }
++        let total = join_width(&segments, group_sep, part_sep);
++        if let Some(segment) = segments.iter_mut().find(|segment| segment.id == "project") {
++            let own = Line::from(segment.text.as_str()).width();
++            let allowed = usize::from(width).saturating_sub(total.saturating_sub(own));
++            segment.text = middle(&segment.text, allowed, config.ascii);
++        }
++        if join_width(&segments, group_sep, part_sep) > usize::from(width)
++            && segments.iter().any(|segment| segment.id == "context")
++        {
++            segments.retain(|segment| segment.id != "project");
++        }
++    }
++    let mut spans = Vec::new();
++    let mut previous = None;
++    for segment in segments {
++        if let Some(group) = previous {
++            spans.push(Span::raw(if group == segment.group {
++                part_sep
++            } else {
++                group_sep
++            }));
++        }
++        previous = Some(segment.group);
++        spans.push(Span::styled(
++            segment.text,
++            if config.colors {
++                Style::default().fg(segment.color)
++            } else {
++                Style::default()
++            },
++        ));
++    }
++    if config.ascii {
++        crate::line_truncation::truncate_line_to_width(Line::from(spans), usize::from(width))
++    } else {
++        crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
++            Line::from(spans),
++            usize::from(width),
++        )
++    }
++}
++
++pub(super) fn uses_project(native: &[super::StatusLineItem]) -> bool {
++    let items = native.iter().map(ToString::to_string).collect::<Vec<_>>();
++    let mode = Mode::from_env(Some(&items));
++    let config = Config::from_env(false);
++    (mode == Mode::Replace || config.explicit_items)
++        && config.items.iter().any(|item| item == "project")
++}
++
++pub(super) fn enriched_native_value(data: &Data, item: super::StatusLineItem) -> Option<String> {
++    use super::StatusLineItem;
++    match item {
++        StatusLineItem::UsedTokens => {
++            let total = &data.usage.as_ref()?.total_token_usage;
++            let uncached = total
++                .input_tokens
++                .max(0)
++                .saturating_sub(total.cached_input_tokens.max(0))
++                .max(0);
++            Some(format!(
++                "sess {} uncached+out",
++                count(uncached.saturating_add(total.output_tokens.max(0)))
++            ))
++        }
++        StatusLineItem::ContextUsed | StatusLineItem::ContextWindowSize => context(data, false),
++        StatusLineItem::ContextRemaining => {
++            let usage = data.usage.as_ref()?;
++            let capacity = data.capacity.filter(|capacity| *capacity > 0)?;
++            let current = usage.last_token_usage.tokens_in_context_window().max(0);
++            let left = (100.0 - current as f64 / capacity as f64 * 100.0).clamp(0.0, 100.0);
++            Some(format!(
++                "ctx {}/{} {left:.0}% left",
++                count(current),
++                count(capacity)
++            ))
++        }
++        _ => None,
++    }
++}
++
++pub(super) fn extend(
++    base: Option<Line<'static>>,
++    data: &Data,
++    config: &Config,
++    native: &[super::StatusLineItem],
++    width: u16,
++) -> Option<Line<'static>> {
++    use super::StatusLineItem as Item;
++    let mut extras = config.clone();
++    if !config.explicit_items {
++        extras.items = ["context", "session", "cache"].map(str::to_owned).to_vec();
++    }
++    extras.items.retain(|item| match item.as_str() {
++        "context" => !native.iter().any(|item| {
++            matches!(
++                item,
++                Item::ContextUsed | Item::ContextRemaining | Item::ContextWindowSize
++            )
++        }),
++        "session" => !native.contains(&Item::UsedTokens),
++        "project" => !native
++            .iter()
++            .any(|item| matches!(item, Item::CurrentDir | Item::ProjectRoot | Item::GitBranch)),
++        "cost" => !native.contains(&Item::EstimatedThreadCost),
++        "tier" => !native
++            .iter()
++            .any(|item| matches!(item, Item::ModelWithReasoning | Item::FastMode)),
++        "model" => !native
++            .iter()
++            .any(|item| matches!(item, Item::ModelName | Item::ModelWithReasoning)),
++        "effort" => !native
++            .iter()
++            .any(|item| matches!(item, Item::Reasoning | Item::ModelWithReasoning)),
++        "limits" => !native
++            .iter()
++            .any(|item| matches!(item, Item::FiveHourLimit | Item::WeeklyLimit)),
++        _ => true,
++    });
++    let mut base = base.unwrap_or_else(|| Line::from(""));
++    let separator = if config.ascii { " || " } else { " ‖ " };
++    let reserved = base.width().saturating_add(if base.width() > 0 {
++        separator.chars().count()
++    } else {
++        0
++    });
++    let available = usize::from(width)
++        .saturating_sub(reserved)
++        .min(usize::from(u16::MAX)) as u16;
++    let extra_line = render(data, &extras, available);
++    if extra_line.width() > 0 {
++        if base.width() > 0 {
++            base.spans.push(Span::raw(separator));
++        }
++        base.spans.extend(extra_line.spans);
++    }
++    (!base.spans.is_empty()).then_some(base)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::token_usage::TokenUsage;
++    fn data() -> Data {
++        Data {
++            usage: Some(TokenUsageInfo {
++                last_token_usage: TokenUsage {
++                    total_tokens: 132_000,
++                    ..Default::default()
++                },
++                total_token_usage: TokenUsage {
++                    input_tokens: 132_000,
++                    cached_input_tokens: 130_000,
++                    output_tokens: 2_000,
++                    total_tokens: 134_000,
++                    ..Default::default()
++                },
++                model_context_window: Some(272_000),
++            }),
++            capacity: Some(272_000),
++            model: "example-model".into(),
++            effort: Some("high".into()),
++            tier: Some("fast".into()),
++            project: "example".into(),
++            branch: Some("main".into()),
++            limits: vec![("5h".into(), 20.0, Some("18:00".into()))],
++            ..Default::default()
++        }
++    }
++    fn config() -> Config {
++        Config {
++            explicit_items: false,
++            items: [
++                "project", "model", "effort", "tier", "context", "limits", "session", "cache",
++            ]
++            .map(str::to_owned)
++            .to_vec(),
++            ascii: true,
++            colors: false,
++        }
++    }
++    #[test]
++    fn status_hud_separates_context_session_cache_and_native_tier() {
++        let text = render(&data(), &config(), 240).to_string();
++        assert!(text.contains("ctx 132K/272K 49%"));
++        assert!(text.contains("sess 4K uncached+out"));
++        assert!(text.contains("cache read 98%"));
++        assert!(text.contains("5h 80% left reset 18:00"));
++        assert!(text.contains("fast"));
++        assert!(!text.contains("264K"));
++    }
++    #[test]
++    fn status_hud_compaction_changes_context_without_resetting_session() {
++        let mut data = data();
++        let before = render(&data, &config(), 240).to_string();
++        data.usage.as_mut().unwrap().last_token_usage.total_tokens = 20_000;
++        let after = render(&data, &config(), 240).to_string();
++        assert!(before.contains("132K/272K"));
++        assert!(after.contains("20K/272K 7%"));
++        assert!(after.contains("sess 4K uncached+out"));
++    }
++    #[test]
++    fn status_hud_responsive_priority_order_and_missing_values() {
++        let mut config = config();
++        config.items.reverse();
++        for width in [0, 4, 12, 30, 60, 100, 240] {
++            let line = render(&data(), &config, width);
++            assert!(line.width() <= usize::from(width));
++            if width >= 12 {
++                assert!(line.to_string().contains("ctx"));
++            }
++        }
++        assert_eq!(render(&Data::default(), &config, 40).to_string(), "");
++        let mut data = data();
++        data.usage.as_mut().unwrap().total_token_usage.input_tokens = 0;
++        assert!(
++            !render(&data, &config, 240)
++                .to_string()
++                .contains("cache read")
++        );
++    }
++    #[test]
++    fn status_hud_auto_mode_and_extension_preserve_native_choices() {
++        let defaults = super::super::DEFAULT_STATUS_LINE_ITEMS.map(str::to_owned);
++        let custom = ["used-tokens".to_owned(), "model".to_owned()];
++        assert_eq!(Mode::choose("auto", None), Mode::Replace);
++        assert_eq!(Mode::choose("auto", Some(&defaults)), Mode::Replace);
++        assert_eq!(Mode::choose("auto", Some(&custom)), Mode::Extend);
++        assert_eq!(Mode::choose("replace", Some(&custom)), Mode::Replace);
++        assert_eq!(Mode::choose("extend", None), Mode::Extend);
++        let native = [
++            super::super::StatusLineItem::UsedTokens,
++            super::super::StatusLineItem::ModelName,
++        ];
++        let base = Line::from("user-order-model-prefix");
++        let combined = extend(Some(base), &data(), &config(), &native, 240)
++            .unwrap()
++            .to_string();
++        assert!(combined.starts_with("user-order-model-prefix"));
++        assert!(combined.contains("ctx 132K/272K 49%"));
++        assert!(combined.contains("cache read 98%"));
++        assert!(!combined.contains("sess"));
++        assert_eq!(
++            enriched_native_value(&data(), native[0]).unwrap(),
++            "sess 4K uncached+out"
++        );
++    }
++}
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+index d7340e5..56f70fd 100644
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -61,3 +61,4 @@ impl StatusSurfaceSelections {
+     fn uses_git_branch(&self) -> bool {
+-        self.status_line_items.contains(&StatusLineItem::GitBranch)
++        (super::status_hud::enabled() && super::status_hud::uses_project(&self.status_line_items))
++            || self.status_line_items.contains(&StatusLineItem::GitBranch)
+             || self
+@@ -106,2 +107,22 @@ pub(super) struct CachedProjectRootName {
+ 
++/// Select native quota labels and never emit the same underlying window twice.
++fn status_hud_windows(
++    windows: [Option<(&RateLimitWindowDisplay, bool)>; 2],
++) -> Vec<(String, f64, Option<String>)> {
++    let mut seen: Vec<&RateLimitWindowDisplay> = Vec::new();
++    let mut result = Vec::new();
++    for (window, secondary) in windows.into_iter().flatten() {
++        if seen.iter().any(|prior| std::ptr::eq(*prior, window)) {
++            continue;
++        }
++        seen.push(window);
++        result.push((
++            limit_label_for_window(window.window_minutes, secondary),
++            window.used_percent,
++            window.resets_at.clone(),
++        ));
++    }
++    result
++}
++
+ impl ChatWidget {
+@@ -202,14 +223,64 @@ impl ChatWidget {
+ 
++    fn status_hud_data(&self) -> super::status_hud::Data {
++        let mut data = super::status_hud::Data {
++            usage: (!self.token_usage_pending)
++                .then(|| self.token_info.clone())
++                .flatten(),
++            capacity: self.status_line_context_window_size(),
++            model: self.current_model().to_owned(),
++            effort: Some(self.reasoning_display_name()),
++            tier: self.current_service_tier().map(str::to_owned),
++            project: format_directory_display(self.status_line_cwd(), None),
++            cost: self
++                .estimated_thread_usage()
++                .and_then(|usage| usage.estimated_usage_usd_micros)
++                .and_then(format_estimated_usd_micros),
++            branch: self.status_line_branch.clone(),
++            ..Default::default()
++        };
++        if let Some(limits) = self.rate_limit_snapshots_by_limit_id.get("codex") {
++            data.limits = status_hud_windows([
++                five_hour_status_window(limits),
++                weekly_status_window(limits),
++            ]);
++        }
++        data
++    }
++
+     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
+-        let enabled = !selections.status_line_items.is_empty();
++        // Modified: optional in-process renderer preserves native selection/config in extension mode.
++        let hud = super::status_hud::enabled().then(|| {
++            let data = self.status_hud_data();
++            let config =
++                super::status_hud::Config::from_env(self.local_settings.tui.status_line_use_colors);
++            let mode =
++                super::status_hud::Mode::from_env(self.local_settings.tui.status_line.as_deref());
++            let width = self
++                .last_rendered_width
++                .get()
++                .unwrap_or(80)
++                .saturating_sub(4);
++            (data, config, mode, width)
++        });
++        if let Some((data, config, super::status_hud::Mode::Replace, width)) = &hud {
++            self.bottom_pane.set_status_line_enabled(true);
++            self.set_status_line(Some(super::status_hud::render(data, config, *width)));
++            self.set_status_line_hyperlink(None);
++            return;
++        }
++        let enabled = !selections.status_line_items.is_empty() || hud.is_some();
+         self.bottom_pane.set_status_line_enabled(enabled);
+         if !enabled {
+-            self.set_status_line(/*status_line*/ None);
+-            self.set_status_line_hyperlink(/*url*/ None);
++            self.set_status_line(None);
++            self.set_status_line_hyperlink(None);
+             return;
+         }
+-
+         let mut segments = Vec::new();
+         for item in &selections.status_line_items {
+-            if let Some(value) = self.status_line_value_for_item(*item) {
++            if let Some(mut value) = self.status_line_value_for_item(*item) {
++                if let Some((data, _, _, _)) = &hud
++                    && let Some(enriched) = super::status_hud::enriched_native_value(data, *item)
++                {
++                    value = enriched;
++                }
+                 segments.push((*item, value));
+@@ -217,4 +288,3 @@ impl ChatWidget {
+         }
+-
+-        self.set_status_line(status_line_from_segments(
++        let mut line = status_line_from_segments(
+             segments,
+@@ -222,3 +292,13 @@ impl ChatWidget {
+             self.thread_id,
+-        ));
++        );
++        if let Some((data, config, _, width)) = &hud {
++            line = super::status_hud::extend(
++                line,
++                data,
++                config,
++                &selections.status_line_items,
++                *width,
++            );
++        }
++        self.set_status_line(line);
+         let hyperlink_url = selections
+@@ -231,2 +311,10 @@ impl ChatWidget {
+ 
++    pub(crate) fn refresh_status_hud_width(&mut self, width: u16) {
++        if super::status_hud::enabled() {
++            self.last_rendered_width.set(Some(width));
++            let selections = self.status_surface_selections();
++            self.refresh_status_line_from_selections(&selections);
++        }
++    }
++
+     /// Clears the terminal title Codex most recently wrote, if any.
+@@ -1287 +1375,31 @@ where
+ }
++
++#[cfg(test)]
++mod status_hud_quota_tests {
++    use super::*;
++    #[test]
++    fn status_hud_nonstandard_windows_keep_native_labels_and_deduplicate() {
++        let first = RateLimitWindowDisplay {
++            used_percent: 25.0,
++            resets_at: None,
++            window_minutes: Some(60),
++        };
++        let second = RateLimitWindowDisplay {
++            used_percent: 50.0,
++            resets_at: None,
++            window_minutes: Some(120),
++        };
++        let windows = status_hud_windows([Some((&first, false)), Some((&second, true))]);
++        assert_eq!(
++            windows
++                .iter()
++                .map(|window| window.0.as_str())
++                .collect::<Vec<_>>(),
++            ["usage", "secondary usage"]
++        );
++        assert_eq!(
++            status_hud_windows([Some((&second, false)), Some((&second, true))]).len(),
++            1
++        );
++    }
++}

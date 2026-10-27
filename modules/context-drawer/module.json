@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "context-drawer",
+  "version": "0.1.0",
+  "description": "Inspect the pinned prompt in a hover or keyboard drawer without moving the transcript; click to jump to its source.",
+  "codex": ["0.164.0"],
+  "order": 20,
+  "dependencies": [],
+  "patches": ["source.patch"],
+  "tests": [{"package": "codex-tui", "filter": "context_drawer"}],
+  "smoke": [["python3", "smoke.py", "{binary}"]],
+  "runtime_env": {"CODEX_UI_CONTEXT_DRAWER": "1"}
+}

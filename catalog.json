@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "bundles": [
+    {
+      "codex": "0.164.0",
+      "platform": "darwin-arm64",
+      "modules": {
+        "context-drawer": "91139933f38983cd162f24ba645cbb7751dc799a15fee85dfa4afa7f063bdec5",
+        "info-pane": "973b1688474caa4af5445a525061729af8047d428190721d481e51911ab6c55b",
+        "statusline": "e4dd0d8965660c11208556709a5a275ac9b4b24ad3d34038626edda28ea130b8"
+      },
+      "runtime_switches": {
+        "info-pane": "CODEX_UI_INFO_PANE",
+        "context-drawer": "CODEX_UI_CONTEXT_DRAWER",
+        "statusline": "CODEX_UI_STATUS_LINE"
+      },
+      "url": "https://github.com/rachael/harness-ui-mods/releases/download/v0.1.0/codex-0.164.0-darwin-arm64-harness-ui-v0.1.0.tar.gz",
+      "sha256": "656303991981f7937b669fd2a8889eebda15df9dd5d2f0c7260656419988cc82"
+    }
+  ],
+  "modules": [
+    {
+      "id": "context-drawer",
+      "version": "0.1.0",
+      "description": "Inspect the pinned prompt in a hover or keyboard drawer without moving the transcript; click to jump to its source.",
+      "codex": [
+        "0.164.0"
+      ]
+    },
+    {
+      "id": "info-pane",
+      "version": "0.1.0",
+      "description": "Native session details, custom sections and response navigation",
+      "codex": [
+        "0.164.0"
+      ]
+    },
+    {
+      "id": "statusline",
+      "version": "0.1.0",
+      "description": "Optional native live HUD with distinct current context, cumulative uncached processing, cache reads and quota windows.",
+      "codex": [
+        "0.164.0"
+      ]
+    }
+  ]
+}

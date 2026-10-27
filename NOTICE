@@ -1,0 +1,18 @@
+OpenAI Codex
+Copyright 2025 OpenAI
+
+This project includes code derived from [Ratatui](https://github.com/ratatui/ratatui), licensed under the MIT license.
+Copyright (c) 2016-2022 Florian Dehau
+Copyright (c) 2023-2025 The Ratatui Developers
+
+Harness UI Mods includes patches derived from OpenAI Codex.
+Changes add optional information panes, response navigation, prompt drawers,
+and mascot presentation. Modified source files are identified in each patch.
+The patcher and original adapter code are covered by the root MIT LICENSE.
+
+Unofficial community project; not affiliated with or endorsed by OpenAI or Anthropic.
+
+Mascot fan art depicts the Claude Code character design associated with Anthropic.
+Project-specific poses and props do not imply ownership of that underlying design.
+The root MIT grant for original project code does not grant third-party character,
+artwork or trademark rights. See assets/README.md for the recorded provenance.
