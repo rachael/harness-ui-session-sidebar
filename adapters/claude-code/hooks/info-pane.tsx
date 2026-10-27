@@ -47,12 +47,13 @@ const tab = atom({ plugin: 'info-pane', key: 'tab' } as const, 'overview')
 const responses = atom({ plugin: 'info-pane', key: 'responses' } as const, [])
 const openResponses = atom({ plugin: 'info-pane', key: 'openResponses' } as const, [])
 const external = atom({ plugin: 'info-pane', key: 'external' } as const, { surfaced: [], sections: [] })
-// The little Claude's speech row: what its last click said, while it shows; and whether the
-// keyboard focus is on it, which shows the click hint as a hover does.
+// The reserved speech row keeps recap messages; hover or keyboard focus reveals a
+// speaking companion's line, or the other companions' click hints, without reflow.
 const said = atom({ plugin: 'info-pane', key: 'said' } as const, '')
 const mascotFocus = atom({ plugin: 'info-pane', key: 'mascotFocus' } as const, false)
 const MASCOT = 'little-claude'
 const SPRITE_HOVER = { scope: MASCOT, color: 'suggestion', bold: true } as const
+const BUBBLE_LEFT = 7
 const SAID_MS = 4000
 // What a click on each kind of Claude does, as the hint says it.
 const HINTS = { toast: 'click: say hi', recap: 'click: recap', next: 'click: another Claude', animate: 'click: wiggle' } as const
@@ -340,8 +341,7 @@ async function poke($: Engine) {
     await update($, corner, () => ({ name: pick(claude.name)?.name ?? claude.name, frame: 0 }))
     return
   }
-  const message =
-    action.kind === 'toast' ? action.text : action.kind === 'recap' ? (await read($, meta)).recap || 'No recap yet: it comes after the first answer.' : ''
+  const message = action.kind === 'recap' ? (await read($, meta)).recap || 'No recap yet: it comes after the first answer.' : ''
   if (message) {
     $.ui.toast(message)
     // A short message also shows in the speech row above the Claude, for a few seconds.
@@ -731,19 +731,19 @@ export function registerInfoPane(on: On) {
       <Box flexDirection="column" width={isTerminal ? width : undefined} minHeight={isTerminal && e.props.placement === 'dock' ? e.props.scroll.bodyRows : undefined} gap={1}>
         {tabs}
         <Box flexDirection="column">
-          {/* The speech row and a blank gap, always reserved so nothing moves: what the last
-              click said, or, on hover or keyboard focus, what a click does. */}
+          {/* Speech and blank gap stay reserved. A toast companion speaks on hover/focus;
+              its click only wiggles. Other companions retain their hints and actions. */}
           {claude ? (
             <Box key="speech" flexDirection="column" height={isTerminal ? 2 : undefined}>
               {spoken ? (
                 <Text color={claude.color} wrap="truncate-end">{`( ${spoken} )`}</Text>
-              ) : isMascotFocused ? (
-                <Text dimColor wrap="truncate-end">{`( ${HINTS[claude.action.kind]} )`}</Text>
               ) : (
                 <>
                   {!isTerminal ? <Text>{'\u00a0'}</Text> : null}
-                  <Box position="absolute" top={0} left={0} display="none" hover={{ scope: MASCOT, display: 'flex' }}>
-                    <Text dimColor wrap="truncate-end">{`( ${HINTS[claude.action.kind]} )`}</Text>
+                  <Box key="speech-bubble" position="absolute" top={0} left={claude.action.kind === 'toast' ? BUBBLE_LEFT : 0} display={isMascotFocused ? 'flex' : 'none'} hover={isMascotFocused ? undefined : { scope: MASCOT, display: 'flex' }}>
+                    <Text color={claude.action.kind === 'toast' ? claude.color : undefined} dimColor={claude.action.kind !== 'toast'} bold={claude.action.kind === 'toast'} wrap="truncate-end">
+                      {claude.action.kind === 'toast' ? `‹ ${claude.action.text} ›` : `( ${HINTS[claude.action.kind]} )`}
+                    </Text>
                   </Box>
                 </>
               )}
@@ -767,6 +767,12 @@ export function registerInfoPane(on: On) {
                     ))}
                   </Box>
                 )}
+                {/* Paint the overlay after the sprite: even an empty sprite cell paints over it. */}
+                {!spoken && claude.action.kind === 'toast' && (sprite[1] ?? '')[BUBBLE_LEFT + 1] === ' ' ? (
+                  <Box key="speech-stem" position="absolute" top={1} left={BUBBLE_LEFT + 1} display={isMascotFocused ? 'flex' : 'none'} hover={isMascotFocused ? undefined : { scope: MASCOT, display: 'flex' }}>
+                    <Text mono color={claude.color} bold>/</Text>
+                  </Box>
+                ) : null}
               </Box>
             ) : null}
             <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={isTerminal ? undefined : 18}>

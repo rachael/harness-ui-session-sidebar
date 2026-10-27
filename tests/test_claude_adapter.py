@@ -79,6 +79,12 @@ class ClaudeAdapterTests(unittest.TestCase):
                 self.assertEqual(len(frame), 4, sprite['name'])
             self.assertEqual(len(widths), 1, sprite['name'])
 
+    def test_idle_waver_has_no_unattached_speech_stem(self):
+        sprites = json.loads(SPRITES.read_text())['sprites']
+        waver = next(sprite for sprite in sprites if sprite['name'] == 'a-waver')
+        self.assertNotIn('/', ''.join(waver['frames'][0]))
+        self.assertEqual(waver['action']['kind'], 'toast')
+
     def test_fixtures_are_consistent(self):
         record = json.loads((FIXTURES/'overview.json').read_text())
         expected = json.loads((FIXTURES/'expected.json').read_text())

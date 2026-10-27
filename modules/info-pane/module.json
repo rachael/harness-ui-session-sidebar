@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "info-pane",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Native session details, custom sections and response navigation",
   "codex": [
     "0.164.0"

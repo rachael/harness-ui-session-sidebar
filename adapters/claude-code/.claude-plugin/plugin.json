@@ -1,7 +1,7 @@
 {
   "name": "info-pane",
   "displayName": "Harness UI",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Harness UI for Claude Code: an info pane (recap, surfaced asks and notes, pins, tasks, responses), a prompt context drawer and a status line",
   "author": {
     "name": "harness-ui-mods contributors"

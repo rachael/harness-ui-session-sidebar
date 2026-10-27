@@ -135,10 +135,12 @@ test('the little Claude answers a click with no model call', async ($, on) => {
   const before = (await ui.find({ type: 'Button', key: 'little-claude' }))?.text
   expect(before).toBeDefined()
   await ui.press({ key: 'little-claude' })
+  await clock.advance(400)
+  const mid = (await ui.find({ type: 'Button', key: 'little-claude' }))?.text
   await clock.advance(5000)
   const after = (await ui.find({ type: 'Button', key: 'little-claude' }))?.text
-  // a toast, a recap toast, or a swap to another Claude: something visible happened
-  expect(toasts > 0 || after !== before).toBe(true)
+  // A wiggle, recap toast or swap is visible; no action calls a model.
+  expect(mid !== before || toasts > 0 || after !== before).toBe(true)
   expect(calls).toBe(0)
 })
 
@@ -210,9 +212,9 @@ test('an explicit AskUserQuestion waits in the pane while its dialog is open, th
 })
 
 // Without a session start no Claude has been picked, and the pane draws the first: the waver,
-// whose click says hi.
+// whose line appears on hover/focus and whose click wiggles.
 
-test('the little Claude keeps a reserved speech row: its hint shows only on hover, a click says hi there for a while', async ($, on) => {
+test('speech and stem share hover visibility; a toast companion click only wiggles without reflow', async ($, on) => {
   const clock = mock.clock(on)
   const toasts: string[] = []
   on('ui.toast', (_: unknown, e: { text: string }) => {
@@ -223,28 +225,44 @@ test('the little Claude keeps a reserved speech row: its hint shows only on hove
   const speech = async () => (await ui.findAll({ type: 'Box' })).find((box: { props: Record<string, unknown> }) => box.props.height === 2)
   // two rows reserved above the Claude whether or not anything is said: nothing moves
   expect((await speech())?.props.flexDirection).toBe('column')
-  const hint = (await ui.findAll({ type: 'Box' })).find((box: { props: Record<string, unknown> }) => box.props.display === 'none')
-  expect(hint?.props.position).toBe('absolute')
-  expect(hint?.text).toBe('( click: say hi )')
+  const parts = (await ui.findAll({ type: 'Box' })).filter(box => box.key === 'speech-bubble' || box.key === 'speech-stem')
+  expect(parts).toHaveLength(2)
+  expect(parts.every(part => part.props.position === 'absolute' && part.props.display === 'none')).toBe(true)
+  expect(parts.map(part => part.text)).toEqual(['‹ hi! :3 ›', '/'])
+  // drawn() retains the surface's declarative hover styles; findAll() omits them.
+  const nodes = (node: any): any[] => [node, ...(node?.children ?? []).filter((child: unknown) => typeof child === 'object').flatMap(nodes)]
+  const drawn = nodes(await ui.drawn())
+  for (const key of ['speech-bubble', 'speech-stem']) {
+    expect(drawn.find(node => node.props?.key === key)?.hover).toEqual({ scope: 'little-claude', display: 'flex' })
+  }
+  expect(drawn.find(node => node.props?.key === 'speech-stem')?.props).toMatchObject({ top: 1, left: 8 })
+  const spriteContainer = drawn.find(node => node.children?.some((child: any) => child.props?.key === 'speech-stem'))
+  // Empty sprite cells still paint: the stem must be drawn after the button/art.
+  expect(spriteContainer?.children.at(-1)?.props?.key).toBe('speech-stem')
+  const before = (await ui.find({ type: 'Button', key: 'little-claude' }))?.text
+  expect(before).not.toContain('/')
 
   await ui.press({ key: 'little-claude' })
-  expect(toasts).toEqual(['hi! :3'])
-  expect((await ui.find({ type: 'Text', text: /^\( hi! :3 \)$/ }))?.text).toBe('( hi! :3 )')
+  await clock.advance(400)
+  expect((await ui.find({ type: 'Button', key: 'little-claude' }))?.text).not.toBe(before)
+  expect(toasts).toEqual([])
   expect((await speech())?.props.height).toBe(2)
   await clock.advance(4000)
-  expect(await ui.find({ type: 'Text', text: /^\( hi! :3 \)$/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'little-claude' }))?.text).toBe(before)
+  expect((await speech())?.props.height).toBe(2)
 })
 
-test('keyboard focus on the little Claude shows its hint, as hover does', async ($, on) => {
+test('keyboard focus reveals bubble and stem together and blur hides both without reflow', async ($, on) => {
   mock.clock(on)
   on('ui.focus', () => ({}))
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, isFocused: true } })
-  expect((await ui.find({ type: 'Text', text: /click: say hi/ }))?.props.dimColor).toBe(true)
-  const hidden = (await ui.findAll({ type: 'Box' })).find((box: { props: Record<string, unknown> }) => box.props.display === 'none')
-  expect(hidden?.text).toBe('( click: say hi )')
+  const parts = async () => (await ui.findAll({ type: 'Box' })).filter(box => box.key === 'speech-bubble' || box.key === 'speech-stem')
+  expect((await parts()).every(part => part.props.display === 'none')).toBe(true)
   // the person tabs onto it: the engine raises ui.focus for the element taking the ring
   await $.ui.focus({ component: 'Pane', requestId: 'info-pane', plugin: 'info-pane', element: 'little-claude', origin: { kind: 'person' } } as never)
-  const shown = (await ui.findAll({ type: 'Box' })).find((box: { props: Record<string, unknown> }) => box.props.display === 'none')
-  expect(shown).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: '( click: say hi )' })).toBeDefined()
+  expect((await parts()).every(part => part.props.display === 'flex')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: '‹ hi! :3 ›' })).toBeDefined()
+  await $.ui.focus({ component: 'Pane', requestId: 'info-pane', plugin: 'info-pane', element: 'tab:overview', origin: { kind: 'person' } } as never)
+  expect((await parts()).every(part => part.props.display === 'none')).toBe(true)
+  expect((await ui.findAll({ type: 'Box' })).find(box => box.key === 'speech')?.props.height).toBe(2)
 })

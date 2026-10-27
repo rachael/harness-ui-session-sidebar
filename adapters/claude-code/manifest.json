@@ -3,7 +3,7 @@
   "id": "claude-code",
   "harness": "claude-code",
   "plugin": "info-pane",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Claude Code adapter: the info pane, the prompt context drawer and the status line, as one plugin with a switch per feature",
   "install": {
     "kind": "claude-marketplace",

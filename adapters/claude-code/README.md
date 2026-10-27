@@ -95,9 +95,16 @@ otherwise:
   above the prompt. Esc restores the layout.
 - A jump to a transcript row is allowed only in answer to the person's own click or
   key, as the engine requires.
-- The plugin test kit has no transcript to scroll and does not expose hover styles, so
+- The plugin test kit has no transcript to scroll; `findAll()` omits hover styles, so
   the tests check that a press asks for the jump and where the card is placed, not the
-  paint.
+  paint. `drawn()` retains the declarative hover styles for structural checks.
+
+Speaking companions show their generic line and an attached stem only on hover or
+keyboard focus. Clicking wiggles; recap, next and animate companions retain their
+actions. The speech row and blank gap stay reserved, and a stem overlays only an
+empty sprite cell, so hover never moves pane content. Desktop sprite rows retain
+monospace nonbreaking spaces. The native Codex pet and static companion remain
+separate renderers; the shared sprite catalog keeps their idle artwork in sync.
 
 Checked by hand on 2.1.310 in fullscreen (a resumed fictional session, no model calls):
 the pane docks, its rows stay one line, `[+]` expands without moving the transcript, a
